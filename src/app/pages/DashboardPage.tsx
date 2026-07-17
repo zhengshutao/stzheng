@@ -4,6 +4,7 @@ import { ChevronLeft, ChevronRight, RefreshCw, TrendingUp, Wallet } from "lucide
 import DashboardNavbar from "./DashboardNavbar";
 import {
   aggregateByDay,
+  computeStockDayPnl,
   computeTotals,
   dayNet,
   fetchDashboardData,
@@ -147,7 +148,7 @@ function CalendarView(props: {
               </span>
               {hasData && (
                 <span className="text-[10px] leading-none font-semibold" style={{ ...mono, color: netColor(net) }}>
-                  {fmtCad(net, { sign: true, compact: true })}
+                  {fmtCad(net, { sign: true })}
                 </span>
               )}
             </button>
@@ -179,8 +180,8 @@ function DayDetail(props: { date: string | null; data: DashboardData; scope: Sco
   }
 
   const txns = scope !== "stock" ? data.transactions.filter((t) => t.date === date) : [];
-  const trades = scope !== "daily" ? data.trades.filter((t) => t.date === date) : [];
   const cashEvents = scope !== "daily" ? data.cash.filter((c) => c.date === date) : [];
+  const tickerPnls = scope !== "daily" ? computeStockDayPnl(data, date) : [];
 
   const snapIdx = data.snapshots.findIndex((s) => s.date === date);
   const snap = snapIdx >= 0 ? data.snapshots[snapIdx] : null;
@@ -191,8 +192,30 @@ function DayDetail(props: { date: string | null; data: DashboardData; scope: Sco
 
   return (
     <div className="rounded-xl p-5 space-y-4" style={box}>
-      <div className="text-sm font-bold text-white" style={display}>
-        {date}
+      <div className="flex items-center justify-between">
+        <div className="text-sm font-bold text-white" style={display}>
+          {date}
+        </div>
+        <div className="flex items-center gap-3">
+          {scope !== "stock" && (
+            <Link
+              to="/dashboard/daily"
+              className="text-[10px] transition-colors hover:text-violet-300"
+              style={{ ...mono, color: "#a78bfa" }}
+            >
+              查看记录 →
+            </Link>
+          )}
+          {scope !== "daily" && (
+            <Link
+              to="/dashboard/stock"
+              className="text-[10px] transition-colors hover:text-violet-300"
+              style={{ ...mono, color: "#a78bfa" }}
+            >
+              查看所有记录 →
+            </Link>
+          )}
+        </div>
       </div>
 
       {scope !== "daily" && snap && Math.abs(stockDelta) >= 0.005 && (
@@ -211,51 +234,19 @@ function DayDetail(props: { date: string | null; data: DashboardData; scope: Sco
         </div>
       )}
 
-      {cashEvents.length > 0 && (
+      {tickerPnls.length > 0 && (
         <div>
           <div className="text-[10px] tracking-widest mb-1.5" style={{ ...mono, color: MUTED }}>
-            股票 · 出入金
+            股票 · 持仓盈亏 ({tickerPnls.length})
           </div>
-          {cashEvents.map((c) => (
-            <div key={c.id} className="flex justify-between items-center py-1.5 text-xs" style={rowBorder}>
+          {tickerPnls.map((p) => (
+            <div key={`${p.ticker}|${p.currency}`} className="flex justify-between items-center py-1.5 text-xs" style={rowBorder}>
               <span style={{ ...mono, color: TEXT }}>
-                {c.type === "deposit" ? "入金" : "出金"} {c.account ?? ""}
-                {c.note ? ` · ${c.note}` : ""}
+                {p.ticker}
+                <span style={{ color: SUB }}> · {p.currency}</span>
+                {p.qty <= 0 && <span style={{ color: MUTED }}> · 已清仓</span>}
               </span>
-              <span style={{ ...mono, color: c.type === "deposit" ? POS : NEG }}>
-                {c.type === "deposit" ? "+" : "−"}
-                {c.amount.toLocaleString()} {c.currency}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {trades.length > 0 && (
-        <div>
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="text-[10px] tracking-widest" style={{ ...mono, color: MUTED }}>
-              股票 · 交易 ({trades.length})
-            </span>
-            <Link
-              to="/dashboard/stock"
-              className="text-[10px] transition-colors hover:text-violet-300"
-              style={{ ...mono, color: "#a78bfa" }}
-            >
-              查看所有记录 →
-            </Link>
-          </div>
-          {trades.map((t) => (
-            <div key={t.id} className="flex justify-between items-center py-1.5 text-xs" style={rowBorder}>
-              <span style={{ ...mono, color: TEXT }}>
-                <span style={{ color: t.side === "buy" ? POS : NEG }}>{t.side === "buy" ? "买" : "卖"}</span>{" "}
-                {t.ticker} × {t.qty} @ {t.price} {t.currency}
-              </span>
-              {t.side === "sell" && t.realized_pnl !== null && (
-                <span style={{ ...mono, color: netColor(t.realized_pnl) }}>
-                  {fmtCad(t.realized_pnl, { sign: true })}
-                </span>
-              )}
+              <span style={{ ...mono, color: netColor(p.pnl) }}>{fmtCad(p.pnl, { sign: true })}</span>
             </div>
           ))}
         </div>
@@ -286,7 +277,7 @@ function DayDetail(props: { date: string | null; data: DashboardData; scope: Sco
         </div>
       )}
 
-      {txns.length === 0 && trades.length === 0 && cashEvents.length === 0 && (!snap || Math.abs(stockDelta) < 0.005) && (
+      {txns.length === 0 && tickerPnls.length === 0 && cashEvents.length === 0 && (!snap || Math.abs(stockDelta) < 0.005) && (
         <div className="text-xs py-6 text-center" style={{ ...mono, color: MUTED }}>
           这一天没有记录
         </div>
@@ -399,7 +390,7 @@ export default function DashboardPage({ initialData }: { initialData?: Dashboard
             </div>
 
             {/* 日历 + 明细 */}
-            <div className="grid grid-cols-1 lg:grid-cols-[1.6fr_1fr] gap-6 items-start">
+            <div className="grid grid-cols-1 lg:grid-cols-[2fr_1fr] gap-6 items-start">
               <CalendarView
                 year={ym.year}
                 month={ym.month}

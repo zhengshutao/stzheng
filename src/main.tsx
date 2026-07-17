@@ -5,6 +5,7 @@
   import LoginPage from "./app/pages/LoginPage.tsx";
   import DashboardPage from "./app/pages/DashboardPage.tsx";
   import StockRecordsPage from "./app/pages/StockRecordsPage.tsx";
+  import DailyRecordsPage from "./app/pages/DailyRecordsPage.tsx";
   import { ProtectedRoute } from "./app/pages/ProtectedRoute.tsx";
   import { AuthProvider } from "./app/lib/AuthContext.tsx";
   import "./styles/index.css";
@@ -28,6 +29,14 @@
             element={
               <ProtectedRoute>
                 <StockRecordsPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/dashboard/daily"
+            element={
+              <ProtectedRoute>
+                <DailyRecordsPage />
               </ProtectedRoute>
             }
           />

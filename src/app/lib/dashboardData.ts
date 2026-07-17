@@ -29,6 +29,7 @@ export interface StockTrade {
   account: string | null;
   realized_pnl: number | null;
   note: string | null;
+  initial_stop: number | null;
 }
 
 export interface StockCash {
@@ -124,6 +125,82 @@ export function dayNet(agg: DayAgg | undefined, scope: Scope): number {
   if (scope === "daily") return agg.daily;
   if (scope === "stock") return agg.stock;
   return agg.daily + agg.stock;
+}
+
+export interface TickerDayPnl {
+  ticker: string;
+  currency: string;
+  qty: number; // 当天收盘后的持仓数量(可能为 0,代表当天清仓)
+  pnl: number; // CAD
+}
+
+function prevDateStr(date: string): string {
+  const d = new Date(`${date}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() - 1);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * 某一天里,每个 ticker(不分账户)的盈亏,折算 CAD。
+ * 用快照里当天/前一天的收盘价(每 ticker+currency 一价) + 当天成交,
+ * 复刻 stockPositions.ts computeDayPnl 的公式:
+ *   隔夜部分 = old_qty * (today_px - prev_px)
+ *   当日买入 = bought * (today_px - buy_avg)
+ *   当日卖出 = sold * (sell_avg - today_px)
+ * 当天清仓(收盘快照里已不存在)时,用当天卖出均价代替 today_px。
+ */
+export function computeStockDayPnl(data: DashboardData, date: string): TickerDayPnl[] {
+  const snap = data.snapshots.find((s) => s.date === date);
+  const prevSnap = data.snapshots.find((s) => s.date === prevDateStr(date));
+  const todayPx = new Map<string, number>();
+  const prevPx = new Map<string, number>();
+  const prevQty = new Map<string, number>();
+  for (const p of snap?.positions ?? []) {
+    todayPx.set(`${p.ticker}|${p.currency}`, p.price);
+  }
+  for (const p of prevSnap?.positions ?? []) {
+    prevPx.set(`${p.ticker}|${p.currency}`, p.price);
+    prevQty.set(`${p.ticker}|${p.currency}`, p.qty);
+  }
+
+  const todayTrades = data.trades.filter((t) => t.date === date);
+  const byKey = new Map<string, { bought: number; buyNotional: number; sold: number; sellNotional: number }>();
+  for (const t of todayTrades) {
+    const key = `${t.ticker}|${t.currency}`;
+    const agg = byKey.get(key) ?? { bought: 0, buyNotional: 0, sold: 0, sellNotional: 0 };
+    if (t.side === "buy") {
+      agg.bought += t.qty;
+      agg.buyNotional += t.qty * t.price;
+    } else {
+      agg.sold += t.qty;
+      agg.sellNotional += t.qty * t.price;
+    }
+    byKey.set(key, agg);
+  }
+
+  const fx = snap?.fx_usdcad ?? prevSnap?.fx_usdcad ?? 1.37;
+  const toCad = (amount: number, currency: string) => (currency === "CAD" ? amount : amount * fx);
+
+  const keys = new Set<string>([...todayPx.keys(), ...prevPx.keys(), ...byKey.keys()]);
+  const out: TickerDayPnl[] = [];
+  for (const key of keys) {
+    const [ticker, currency] = key.split("|");
+    const trade = byKey.get(key);
+    const bought = trade?.bought ?? 0;
+    const sold = trade?.sold ?? 0;
+    const buyAvg = bought > 0 ? trade!.buyNotional / bought : 0;
+    const sellAvg = sold > 0 ? trade!.sellNotional / sold : 0;
+    const oldQty = prevQty.get(key) ?? 0;
+    const todayPrice = todayPx.get(key) ?? sellAvg ?? prevPx.get(key) ?? 0;
+    const prevPrice = prevPx.get(key) ?? buyAvg ?? todayPrice;
+
+    const pnl = oldQty * (todayPrice - prevPrice) + bought * (todayPrice - buyAvg) + sold * (sellAvg - todayPrice);
+    if (Math.abs(pnl) < 0.005 && bought === 0 && sold === 0) continue;
+    out.push({ ticker, currency, qty: oldQty + bought - sold, pnl: Math.round(toCad(pnl, currency) * 100) / 100 });
+  }
+
+  out.sort((a, b) => Math.abs(b.pnl) - Math.abs(a.pnl));
+  return out;
 }
 
 export interface Totals {

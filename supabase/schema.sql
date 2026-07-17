@@ -36,6 +36,7 @@ create table if not exists public.stock_trades (
   account      text,
   realized_pnl numeric,
   note         text,
+  initial_stop numeric,             -- 买入时设置的开仓止损,作为动量止损棘轮的下限
   synced_at    timestamptz not null default now()
 );
 create index if not exists idx_stock_trades_user_date on public.stock_trades (user_id, date);
@@ -77,6 +78,14 @@ alter table public.stock_snapshots    enable row level security;
 drop policy if exists "own read" on public.daily_transactions;
 create policy "own read" on public.daily_transactions for select to authenticated using (auth.uid() = user_id);
 
+-- 网页端手动记账: 登录用户可增/改/删自己的记录
+drop policy if exists "own insert" on public.daily_transactions;
+create policy "own insert" on public.daily_transactions for insert to authenticated with check (auth.uid() = user_id);
+drop policy if exists "own update" on public.daily_transactions;
+create policy "own update" on public.daily_transactions for update to authenticated using (auth.uid() = user_id) with check (auth.uid() = user_id);
+drop policy if exists "own delete" on public.daily_transactions;
+create policy "own delete" on public.daily_transactions for delete to authenticated using (auth.uid() = user_id);
+
 drop policy if exists "own read" on public.stock_trades;
 create policy "own read" on public.stock_trades for select to authenticated using (auth.uid() = user_id);
 
@@ -85,3 +94,30 @@ create policy "own read" on public.stock_cash for select to authenticated using 
 
 drop policy if exists "own read" on public.stock_snapshots;
 create policy "own read" on public.stock_snapshots for select to authenticated using (auth.uid() = user_id);
+
+-- ============ 网页端下单/出入金: 登录用户可写自己的记录 ============
+drop policy if exists "own insert" on public.stock_trades;
+create policy "own insert" on public.stock_trades for insert to authenticated with check (auth.uid() = user_id);
+drop policy if exists "own delete" on public.stock_trades;
+create policy "own delete" on public.stock_trades for delete to authenticated using (auth.uid() = user_id);
+
+drop policy if exists "own insert" on public.stock_cash;
+create policy "own insert" on public.stock_cash for insert to authenticated with check (auth.uid() = user_id);
+drop policy if exists "own delete" on public.stock_cash;
+create policy "own delete" on public.stock_cash for delete to authenticated using (auth.uid() = user_id);
+
+-- ============ 动量止损棘轮状态(止损只升不降,按持仓生命周期记忆最高止损) ============
+create table if not exists public.stock_stop_ratchet (
+  user_id       uuid not null references auth.users(id) on delete cascade,
+  ticker        text not null,
+  anchor        text not null,          -- 该持仓最早开仓 lot 的 ts,标识持仓生命周期
+  stop          numeric not null,       -- 当前生效的棘轮止损位(只升不降)
+  initial_floor numeric,                -- 用户在买入时设置的开仓止损(棘轮下限)
+  since         date not null,
+  updated_at    date not null,
+  primary key (user_id, ticker)
+);
+alter table public.stock_stop_ratchet enable row level security;
+drop policy if exists "own rw" on public.stock_stop_ratchet;
+create policy "own rw" on public.stock_stop_ratchet for all to authenticated
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
