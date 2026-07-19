@@ -14,6 +14,12 @@ export interface DailyTx {
   is_transfer: boolean;
   pending: boolean;
   source: string | null;
+  institution_name: string | null;
+  merge_group_id: string | null;
+  /** 只在合并壳子行上有值:被收起来的原始记录,供展开查看/拆开用 */
+  members?: DailyTx[];
+  /** 只在合并壳子行上有值:组内金额绝对值最大那条原始记录的真实 id,编辑壳子的类别/备注时实际更新的是这一条 */
+  primary_id?: string;
 }
 
 export interface StockTrade {
@@ -82,6 +88,51 @@ export async function fetchDashboardData(): Promise<DashboardData> {
     fetchAll<StockSnapshot>("stock_snapshots", "date"),
   ]);
   return { transactions, trades, cash, snapshots };
+}
+
+/**
+ * 把共享 merge_group_id 的原始交易收起来,合成一条净额"壳子"记录 —— 原始记录本身不动,
+ * 只是在展示/统计时把它们当一条:金额取代数和(比如聚餐 200 + 朋友转回 3x50,净额就是 50),
+ * 日期/商家/类别取组内金额绝对值最大的那条(通常就是真正花钱的那笔),其余字段收进 members
+ * 供展开查看或"拆开"用。没有 merge_group_id 的行原样透传。
+ */
+export function mergeGroupedTxns(transactions: DailyTx[]): DailyTx[] {
+  const groups = new Map<string, DailyTx[]>();
+  const out: DailyTx[] = [];
+
+  for (const t of transactions) {
+    if (!t.merge_group_id) {
+      out.push(t);
+      continue;
+    }
+    const g = groups.get(t.merge_group_id);
+    if (g) g.push(t);
+    else groups.set(t.merge_group_id, [t]);
+  }
+
+  for (const [groupId, members] of groups) {
+    const primary = members.reduce((a, b) => (Math.abs(b.amount) > Math.abs(a.amount) ? b : a));
+    const amount = members.reduce((sum, m) => sum + m.amount, 0);
+    out.push({
+      id: `merge:${groupId}`,
+      date: primary.date,
+      name: primary.name,
+      merchant: primary.merchant,
+      amount,
+      currency: primary.currency,
+      category: primary.category,
+      note: primary.note,
+      is_transfer: false,
+      pending: members.some((m) => m.pending),
+      source: "merged",
+      institution_name: primary.institution_name,
+      merge_group_id: groupId,
+      members: members.slice().sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0)),
+      primary_id: primary.id,
+    });
+  }
+
+  return out;
 }
 
 // ---------- 聚合 ----------

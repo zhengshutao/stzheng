@@ -83,7 +83,7 @@ function CalendarView(props: {
 
   return (
     <div
-      className="rounded-xl p-5"
+      className="rounded-xl p-5 h-full"
       style={{ background: "rgba(10,14,28,0.82)", border: "1px solid rgba(139,92,246,0.18)" }}
     >
       <div className="flex items-center justify-between mb-4">
@@ -171,7 +171,7 @@ function DayDetail(props: { date: string | null; data: DashboardData; scope: Sco
 
   if (!date) {
     return (
-      <div className="rounded-xl p-5 flex items-center justify-center min-h-[200px]" style={box}>
+      <div className="rounded-xl p-5 flex items-center justify-center min-h-[200px] h-full" style={box}>
         <span className="text-xs" style={{ ...mono, color: MUTED }}>
           点一个日期看明细
         </span>
@@ -191,7 +191,7 @@ function DayDetail(props: { date: string | null; data: DashboardData; scope: Sco
   const rowBorder = { borderBottom: "1px solid rgba(139,92,246,0.08)" };
 
   return (
-    <div className="rounded-xl p-5 space-y-4" style={box}>
+    <div className="rounded-xl p-5 space-y-4 h-full" style={box}>
       <div className="flex items-center justify-between">
         <div className="text-sm font-bold text-white" style={display}>
           {date}
@@ -259,7 +259,7 @@ function DayDetail(props: { date: string | null; data: DashboardData; scope: Sco
           </div>
           {txns.map((t) => (
             <div key={t.id} className="flex justify-between items-center gap-3 py-1.5 text-xs" style={rowBorder}>
-              <span className="truncate" style={{ ...mono, color: t.is_transfer ? MUTED : TEXT }}>
+              <span className="truncate min-w-0" style={{ ...mono, color: t.is_transfer ? MUTED : TEXT }}>
                 {t.merchant || t.name || "—"}
                 {t.is_transfer && " · 转账"}
                 {t.category && !t.is_transfer && (
@@ -390,7 +390,7 @@ export default function DashboardPage({ initialData }: { initialData?: Dashboard
             </div>
 
             {/* 日历 + 明细 */}
-            <div className="grid grid-cols-1 lg:grid-cols-[2fr_1fr] gap-6 items-start">
+            <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)] gap-6 items-stretch">
               <CalendarView
                 year={ym.year}
                 month={ym.month}

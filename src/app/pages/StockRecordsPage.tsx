@@ -222,6 +222,9 @@ export default function StockRecordsPage() {
   const [error, setError] = useState<string | null>(null);
   const [account, setAccount] = useState<string>("all");
   const [ticker, setTicker] = useState<string>("all");
+  const [month, setMonth] = useState<string>("all");
+  const monthInitRef = useRef(false);
+  const [day, setDay] = useState<string>("all");
 
   const [quotes, setQuotes] = useState<QuotesResponse | null>(null);
   const [stops, setStops] = useState<Record<string, StopsInfo>>({});
@@ -353,13 +356,41 @@ export default function StockRecordsPage() {
     [data]
   );
 
+  const months = useMemo(
+    () => (data ? [...new Set(data.trades.map((t) => t.date.slice(0, 7)))].sort((a, b) => b.localeCompare(a)) : []),
+    [data]
+  );
+
+  useEffect(() => {
+    if (!monthInitRef.current && months.length > 0) {
+      setMonth(months[0]);
+      monthInitRef.current = true;
+    }
+  }, [months]);
+
+  const days = useMemo(() => {
+    if (!data) return [];
+    return [...new Set(data.trades.filter((t) => month === "all" || t.date.slice(0, 7) === month).map((t) => t.date))]
+      .sort((a, b) => b.localeCompare(a));
+  }, [data, month]);
+
+  useEffect(() => {
+    setDay("all");
+  }, [month]);
+
   const filteredTrades = useMemo(() => {
     if (!data) return [];
     return data.trades
-      .filter((t) => (account === "all" || t.account === account) && (ticker === "all" || t.ticker === ticker))
+      .filter(
+        (t) =>
+          (account === "all" || t.account === account) &&
+          (ticker === "all" || t.ticker === ticker) &&
+          (month === "all" || t.date.slice(0, 7) === month) &&
+          (day === "all" || t.date === day)
+      )
       .slice()
-      .reverse();
-  }, [data, account, ticker]);
+      .sort((a, b) => (b.ts ?? b.date).localeCompare(a.ts ?? a.date));
+  }, [data, account, ticker, month, day]);
 
   // ---------- 买卖 ----------
 
@@ -736,6 +767,18 @@ export default function StockRecordsPage() {
                   交易历史 ({filteredTrades.length})
                 </div>
                 <div className="flex gap-2">
+                  <select value={month} onChange={(e) => setMonth(e.target.value)} style={selectStyle}>
+                    <option value="all">全部月份</option>
+                    {months.map((m) => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+                  </select>
+                  <select value={day} onChange={(e) => setDay(e.target.value)} style={selectStyle}>
+                    <option value="all">全部日期</option>
+                    {days.map((d) => (
+                      <option key={d} value={d}>{d}</option>
+                    ))}
+                  </select>
                   <select value={ticker} onChange={(e) => setTicker(e.target.value)} style={selectStyle}>
                     <option value="all">全部代码</option>
                     {tickers.map((t) => (
@@ -753,7 +796,7 @@ export default function StockRecordsPage() {
                 <table className="w-full border-collapse">
                   <thead>
                     <tr style={{ borderBottom: "1px solid rgba(139,92,246,0.18)" }}>
-                      {["日期", "方向", "代码", "数量", "价格", "币种", "账户", "已实现盈亏", ""].map((h) => (
+                      {["日期", "时间", "方向", "代码", "数量", "价格", "总价", "已实现盈亏", "币种", "账户", ""].map((h) => (
                         <th key={h} className={th} style={{ ...mono, color: MUTED, position: "sticky", top: 0, background: "#0a0e1c" }}>
                           {h}
                         </th>
@@ -764,17 +807,21 @@ export default function StockRecordsPage() {
                     {filteredTrades.map((t: StockTrade) => (
                       <tr key={t.id} style={{ borderBottom: "1px solid rgba(139,92,246,0.07)" }}>
                         <td className={td} style={{ ...mono, color: SUB }}>{t.date}</td>
+                        <td className={td} style={{ ...mono, color: MUTED }}>
+                          {t.ts ? new Date(t.ts).toLocaleTimeString("en-CA", { hour: "2-digit", minute: "2-digit", hour12: false }) : "–"}
+                        </td>
                         <td className={td} style={{ ...mono, color: t.side === "buy" ? POS : NEG, fontWeight: 600 }}>
                           {t.side === "buy" ? "买" : "卖"}
                         </td>
                         <td className={td} style={{ ...mono, color: TEXT, fontWeight: 600 }}>{t.ticker}</td>
                         <td className={td} style={{ ...mono, color: TEXT }}>{t.qty}</td>
                         <td className={td} style={{ ...mono, color: TEXT }}>{t.price.toLocaleString()}</td>
-                        <td className={td} style={{ ...mono, color: SUB }}>{t.currency}</td>
-                        <td className={td} style={{ ...mono, color: SUB }}>{t.account ?? "–"}</td>
+                        <td className={td} style={{ ...mono, color: TEXT }}>{(t.qty * t.price).toLocaleString()}</td>
                         <td className={td} style={{ ...mono, color: t.side === "sell" && t.realized_pnl !== null ? netColor(t.realized_pnl) : MUTED }}>
                           {t.side === "sell" && t.realized_pnl !== null ? fmtCad(t.realized_pnl, { sign: true }) : "–"}
                         </td>
+                        <td className={td} style={{ ...mono, color: SUB }}>{t.currency}</td>
+                        <td className={td} style={{ ...mono, color: SUB }}>{t.account ?? "–"}</td>
                         <td className={td}>
                           <div className="flex gap-1.5">
                             <button

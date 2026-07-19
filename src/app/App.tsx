@@ -1,9 +1,12 @@
 import { useState, useEffect, useRef, useCallback, type FormEvent } from "react";
+import { useNavigate } from "react-router";
 import { motion, AnimatePresence } from "motion/react";
 import heroBg from "@/imports/890e88bf-8d8b-40b5-94af-aaa454a0cfb3.mp4";
 import uwSeal from "@/assets/uw-seal.svg";
 import avatarImg from "@/assets/avatar.jpg";
 import gradAvatar from "@/assets/grad-avatar.png";
+import { supabase } from "@/app/lib/supabase";
+import { useAuth } from "@/app/lib/AuthContext";
 import {
   ChevronLeft, ChevronRight, X, Send, Download, ExternalLink,
   Github, Linkedin, Mail, Volume2, VolumeX,
@@ -19,35 +22,35 @@ const SECTION_IDS = ["home", "profile", "journey", "skills", "projects", "contac
 const JOURNEY = [
   {
     year: "2024",
-    period: "Jan 2023 – Apr 2023 · May 2024 – Present",
+    period: "Co-op \nJan – Apr 2023\nFull-time \nMay 2024 – Present",
     role: "Web Developer",
     company: "AEC Daily Inc · Newmarket, ON",
     bullets: [
-      "Designed and implemented an OOP reporting framework with extensible API design and multi-format output (Excel/HTML), significantly improving maintainability and reducing code duplication.",
-      "Discovered, reported, and resolved a critical security vulnerability in the admin auth system where access was granted solely on email domain — led risk analysis and implemented stricter validation protocols.",
-      "Extended a gettext-based i18n system across Smarty/PHP templates to support European market expansion, managing translation extraction and locale-specific rendering for French and Spanish.",
-      "Developed a Recommended Courses feature dynamically suggesting content via PostgreSQL queries and front-end integration through Smarty/PHP, enhancing user engagement and personalized learning paths.",
+      "Investigated and remediated two blind SQL injection vulnerabilities, eliminating the attack surface by sourcing user identity from session state instead of client input; designed a centralized, boundary-level parameter sanitization layer replacing 4 scattered validation points, with sanitization ordering deliberately sequenced around session and application-stack initialization to prevent unsanitized data propagation.",
+      "Identified and fixed a privilege-escalation vulnerability where staff access was inferred from unverified email domain matching, replacing it with an explicit authorization flag in the user schema.",
+      "Designed an ordered multi-language user preference model, enabling graceful content fallback when courses lacked translations in a user's top-preferred language; extended the gettext-based templating system to render UI text through the same preference chain, unifying content and interface localization under one data-driven mechanism.",
+      "Extended the Live Session Report with multi-session Excel export, and optimized the Link Report to handle large datasets by capping results at 1000 rows with batched cell styling; eliminated a redundant duplicate-processing loop in the Online Event Report to reduce unnecessary computation.",
     ],
   },
   {
     year: "2022",
-    period: "May 2022 – Aug 2022",
+    period: "Co-op\nMay – Aug. 2022",
     role: "Software Engineer",
     company: "Lifion by ADP · New York, NY",
     bullets: [
-      "Redesigned and added new features into an internal flowchart application with Node.js, improving output information and user experience.",
-      "Developed new logic operators for the internal flowchart application, increasing functionality for business users.",
-      "Implemented integration testing via Jenkins, ensuring coverage of over 90% of newly introduced features and guaranteeing application robustness.",
+      "Extended an internal low-code workflow engine used by non-technical staff to define server-side business logic, adding new conditional logic operators to expand the range of business rules users could express without writing code.",
+      "Redesigned the application's output display to surface more detailed execution results, improving visibility into how a configured workflow behaved at runtime.",
+      "Wrote integration tests within the team's existing Jenkins CI pipeline, achieving over 90% coverage of newly introduced functionality to safeguard release stability.",
     ],
   },
   {
     year: "2020",
-    period: "Sept 2020 – Aug 2021",
+    period: "Co-op\nSept. 2020 – Aug. 2021",
     role: "Quality Assurance Engineer",
     company: "NetDragon Websoft Holdings · Fuzhou, China",
     bullets: [
-      "Developed an automated testing system for ActivPanel by Promethean — an educational interactive display deployed in over 1 million classrooms worldwide.",
-      "Played a key role in three product launches by creating an optimised test workflow in JIRA, facilitating efficient test case management, risk assessment automation, and insightful test reports.",
+      "Built an automated UI testing system for ActivPanel that simulated user button interactions and validated expected on-screen responses, catching functional defects before release.",
+      "Executed a combination of standardized regression test cases and new feature test cases across three product launches, documenting defects in JIRA and producing release-readiness reports to guide go/no-go decisions.",
     ],
   },
 ];
@@ -73,6 +76,12 @@ const PROJECTS = [
   {
     id: "01", name: "CELPIP Practice Platform", type: "EdTech · Full-Stack",
     desc: "Production-ready English exam platform with AI scoring, WebRTC speaking assessments, and real-time progress — serving 500+ concurrent users at deercelpip.com.",
+    bullets: [
+      "Architected a production English exam practice platform with 30+ Flask REST APIs, powering test delivery, user submissions, AI-based scoring, personalized feedback, and speech-to-text transcription.",
+      "Designed PostgreSQL schemas, indexing, and transaction handling to maintain data consistency under concurrent submissions, supporting thousands of learners with sub-second response times.",
+      "Secured the platform end-to-end with JWT authentication, PBKDF2 password hashing, Fernet encryption, and defenses against SQL injection and XSS.",
+      "Reduced page-load time by 60% through CDN delivery, caching, and compression; validated platform stability under 500+ concurrent users through load testing.",
+    ],
     color: "#8b5cf6",
     link: "https://www.deercelpip.com",
     tech: ["JavaScript", "Python", "Flask", "PostgreSQL", "WebRTC", "Docker", "WebSockets"],
@@ -81,6 +90,11 @@ const PROJECTS = [
   {
     id: "02", name: "Aya Calendar", type: "Mobile · Couples App",
     desc: "Local-first couples productivity app with offline-first SQLite sync, native iOS Home Screen Widgets in Swift/WidgetKit, and a serverless CloudBase backend.",
+    bullets: [
+      "Built a local-first Flutter application using Drift (SQLite) with incremental Tencent CloudBase synchronization, implementing last-write-wins conflict resolution to reconcile offline edits across calendar, mood, and journal modules.",
+      "Developed CloudBase serverless functions handling authentication, data synchronization, and partner-interaction features such as habit-tracking check-ins and notifications.",
+      "Created native iOS Home Screen Widgets with Swift and WidgetKit and automated iOS builds and releases through Xcode Cloud.",
+    ],
     color: "#ec4899",
     tech: ["Flutter", "Dart", "Swift", "WidgetKit", "Tencent CloudBase", "Xcode Cloud"],
     img: "https://images.unsplash.com/photo-1506784983877-45594efa4cbe?w=900&h=600&fit=crop&auto=format&q=80",
@@ -142,6 +156,23 @@ function Navbar({
 }) {
   const [lang, setLang] = useState<"CN" | "EN">("EN");
   const [mobileOpen, setMobileOpen] = useState(false);
+  const navigate = useNavigate();
+  const { session } = useAuth();
+  const avatarClicksRef = useRef(0);
+  const avatarClickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleAvatarClick = () => {
+    avatarClicksRef.current += 1;
+    if (avatarClickTimerRef.current) clearTimeout(avatarClickTimerRef.current);
+    if (avatarClicksRef.current >= 3) {
+      avatarClicksRef.current = 0;
+      navigate(session ? "/dashboard" : "/login");
+      return;
+    }
+    avatarClickTimerRef.current = setTimeout(() => {
+      avatarClicksRef.current = 0;
+    }, 600);
+  };
 
   return (
     <>
@@ -158,7 +189,8 @@ function Navbar({
           <img
             src={gradAvatar}
             alt="Shutao"
-            className="w-9 h-9 rounded-full object-cover flex-shrink-0"
+            onClick={handleAvatarClick}
+            className="w-9 h-9 rounded-full object-cover flex-shrink-0 cursor-pointer select-none"
             style={{ border: "1px solid rgba(139,92,246,0.5)" }}
           />
           <div className="hidden sm:flex flex-col leading-none">
@@ -722,7 +754,7 @@ function JourneySection() {
                 >
                   {item.year}
                 </div>
-                <div className="text-[10px] leading-tight" style={{ ...mono, color: "#4a5568" }}>
+                <div className="text-[10px] leading-tight" style={{ ...mono, color: "#4a5568", whiteSpace: "pre-line" }}>
                   {item.period}
                 </div>
               </div>
@@ -1001,6 +1033,16 @@ function ProjectsSection() {
                   </span>
                 </div>
                 <p className="text-sm leading-relaxed" style={{ ...body, color: "#8a99b8" }}>{p.desc}</p>
+                {p.bullets && (
+                  <ul className="space-y-2.5">
+                    {p.bullets.map((b, j) => (
+                      <li key={j} className="flex gap-3 text-sm leading-relaxed">
+                        <span className="mt-1.5 w-1 h-1 rounded-full flex-shrink-0" style={{ background: p.color, minWidth: 4, minHeight: 4 }} />
+                        <span style={{ ...body, color: "#8a99b8" }}>{b}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
                 <div className="flex flex-wrap gap-2">
                   {p.tech.map(t => (
                     <span key={t} className="text-[10px] px-2.5 py-1 rounded" style={{ ...mono, background: "rgba(139,92,246,0.08)", color: "#c4cde0", border: "1px solid rgba(139,92,246,0.18)" }}>
@@ -1079,6 +1121,8 @@ function ProjectsSection() {
 function ContactSection() {
   const [form, setForm] = useState({ name: "", email: "", type: "", message: "" });
   const [sent, setSent] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const ref = useRef<HTMLElement>(null);
   const [visible, setVisible] = useState(false);
 
@@ -1090,8 +1134,16 @@ function ContactSection() {
     return () => obs.disconnect();
   }, []);
 
-  const handleSubmit = (e: FormEvent) => {
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    setSending(true);
+    setError(null);
+    const { error: invokeError } = await supabase.functions.invoke("contact-form", { body: form });
+    setSending(false);
+    if (invokeError) {
+      setError("Failed to send — please try again or email me directly.");
+      return;
+    }
     setSent(true);
     setTimeout(() => setSent(false), 4000);
     setForm({ name: "", email: "", type: "", message: "" });
@@ -1226,9 +1278,13 @@ function ContactSection() {
                       required
                     />
                   </div>
+                  {error && (
+                    <div className="text-xs" style={{ ...mono, color: "#f87171" }}>{error}</div>
+                  )}
                   <button
                     type="submit"
-                    className="w-full flex items-center justify-center gap-2.5 py-3 text-sm font-semibold tracking-widest rounded-lg transition-all duration-300 hover:opacity-90"
+                    disabled={sending}
+                    className="w-full flex items-center justify-center gap-2.5 py-3 text-sm font-semibold tracking-widest rounded-lg transition-all duration-300 hover:opacity-90 disabled:opacity-50"
                     style={{
                       ...mono,
                       color: "#fff",
@@ -1237,7 +1293,7 @@ function ContactSection() {
                       boxShadow: "0 0 20px rgba(139,92,246,0.25), inset 0 0 20px rgba(139,92,246,0.05)",
                     }}
                   >
-                    <Send size={14} /> SEND MESSAGE
+                    <Send size={14} /> {sending ? "SENDING..." : "SEND MESSAGE"}
                   </button>
                 </motion.form>
               )}
