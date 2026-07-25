@@ -3,6 +3,7 @@ import { Link } from "react-router";
 import { ArrowLeft, RefreshCw } from "lucide-react";
 import DashboardNavbar from "./DashboardNavbar";
 import { useAuth } from "@/app/lib/AuthContext";
+import { marketSessionDate, isPreMarketLabelWindow } from "@/app/lib/marketTime";
 import {
   Dialog,
   DialogContent,
@@ -21,6 +22,7 @@ import {
   computeDayPnl,
   computePositions,
   computeStockSummary,
+  contractMultiplier,
   matchSell,
   stopAnchorAndFloor,
   type Position,
@@ -102,10 +104,6 @@ const actionBtn = {
   cursor: "pointer",
   border: "1px solid transparent",
 };
-
-function todayLocalDate(): string {
-  return new Intl.DateTimeFormat("en-CA").format(new Date());
-}
 
 function toLocalInputValue(d: Date): string {
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -312,7 +310,7 @@ export default function StockRecordsPage() {
     () =>
       positions.reduce((sum, p) => {
         const live = livePrice(p, quotes) ?? p.avg_cost;
-        return sum + toCad(p.qty * live, p.currency, fx);
+        return sum + toCad(p.qty * live * contractMultiplier(p.ticker), p.currency, fx);
       }, 0),
     [positions, quotes, fx]
   );
@@ -333,7 +331,7 @@ export default function StockRecordsPage() {
       positions.reduce((sum, p) => {
         const live = livePrice(p, quotes);
         if (live === null) return sum;
-        return sum + toCad((live - p.avg_cost) * p.qty, p.currency, fx);
+        return sum + toCad((live - p.avg_cost) * p.qty * contractMultiplier(p.ticker), p.currency, fx);
       }, 0),
     [positions, quotes, fx]
   );
@@ -345,11 +343,8 @@ export default function StockRecordsPage() {
 
   const totalPnlCad = floatingPnlCad + realizedPnlCad;
 
-  const todayStr = todayLocalDate();
-  const todayTrades = useMemo(
-    () => (data ? data.trades.filter((t) => t.date === todayStr) : []),
-    [data, todayStr]
-  );
+  const todayStr = marketSessionDate();
+  const dayPnlLabel = isPreMarketLabelWindow() ? "昨日盈亏" : "今日盈亏";
 
   const tickers = useMemo(
     () => (data ? [...new Set(data.trades.map((t) => t.ticker))].sort() : []),
@@ -705,7 +700,7 @@ export default function StockRecordsPage() {
                       <th className={th} style={{ ...mono, color: MUTED }} title={MOM_TOOLTIP}>
                         动量止损 ⓘ
                       </th>
-                      {["今日盈亏", "持仓盈亏", "市值"].map((h) => (
+                      {[dayPnlLabel, "持仓盈亏", "市值"].map((h) => (
                         <th key={h} className={th} style={{ ...mono, color: MUTED }}>
                           {h}
                         </th>
@@ -716,10 +711,11 @@ export default function StockRecordsPage() {
                     {positions.map((p) => {
                       const live = livePrice(p, quotes);
                       const pc = prevClose(p, quotes);
-                      const { dayPnl, dayPct } = computeDayPnl(p, live, pc, todayTrades);
-                      const posPnl = live !== null ? (live - p.avg_cost) * p.qty : null;
+                      const { dayPnl, dayPct } = computeDayPnl(p, live, pc, todayStr);
+                      const multiplier = contractMultiplier(p.ticker);
+                      const posPnl = live !== null ? (live - p.avg_cost) * p.qty * multiplier : null;
                       const posPct = live !== null && p.avg_cost > 0 ? ((live - p.avg_cost) / p.avg_cost) * 100 : null;
-                      const value = live !== null ? live * p.qty : null;
+                      const value = live !== null ? live * p.qty * multiplier : null;
                       return (
                         <tr key={`${p.ticker}-${p.currency}-${p.account}`} style={{ borderBottom: "1px solid rgba(139,92,246,0.07)" }}>
                           <td className={td} style={{ ...mono, color: TEXT, fontWeight: 600 }}>{p.ticker}</td>
@@ -816,7 +812,7 @@ export default function StockRecordsPage() {
                         <td className={td} style={{ ...mono, color: TEXT, fontWeight: 600 }}>{t.ticker}</td>
                         <td className={td} style={{ ...mono, color: TEXT }}>{t.qty}</td>
                         <td className={td} style={{ ...mono, color: TEXT }}>{t.price.toLocaleString()}</td>
-                        <td className={td} style={{ ...mono, color: TEXT }}>{(t.qty * t.price).toLocaleString()}</td>
+                        <td className={td} style={{ ...mono, color: TEXT }}>{(t.qty * t.price * contractMultiplier(t.ticker)).toLocaleString()}</td>
                         <td className={td} style={{ ...mono, color: t.side === "sell" && t.realized_pnl !== null ? netColor(t.realized_pnl) : MUTED }}>
                           {t.side === "sell" && t.realized_pnl !== null ? fmtCad(t.realized_pnl, { sign: true }) : "–"}
                         </td>

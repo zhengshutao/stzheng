@@ -33,25 +33,35 @@ function posKey(ticker: string, currency: string, account: string): string {
   return `${ticker}|${currency}|${account}`;
 }
 
+// 期权按"张"(contract)交易,一张对应 100 股标的——买卖价、现价都是"每股"权利金,
+// 换算成实际金额(市值/盈亏/占用现金)要乘以 100。ticker 是手输的自由文本才会是期权,
+// 形如 "TSLA Jul 27 $410 Call"(标的 + 到期月日 + 行权价 + 方向)。
+const OPTION_TICKER_RE = /^[A-Za-z.]{1,6}\s+[A-Za-z]{3}[a-z]*\s+\d{1,2}\s+\$\d+(?:\.\d+)?\s+(Call|Put)$/i;
+
+export function contractMultiplier(ticker: string): number {
+  return OPTION_TICKER_RE.test(ticker.trim()) ? 100 : 1;
+}
+
 /** FIFO 消耗 lots(原地修改,清空已耗尽的 lot),返回卖出结算结果。 */
 function consumeLotsFifo(
   lots: Lot[],
   qty: number,
   price: number,
-  fees: number
+  fees: number,
+  multiplier: number
 ): { realized_pnl: number; realized_pct: number; warning?: string } {
   let remaining = qty;
   let costBasis = 0;
   while (remaining > 1e-9 && lots.length > 0) {
     const lot = lots[0];
     const take = Math.min(lot.qty, remaining);
-    costBasis += take * lot.price;
+    costBasis += take * lot.price * multiplier;
     lot.qty -= take;
     remaining -= take;
     if (lot.qty <= 1e-9) lots.shift();
   }
   const soldQty = qty - remaining;
-  const realized = soldQty * price - costBasis - fees;
+  const realized = soldQty * price * multiplier - costBasis - fees;
   const realizedPct = costBasis > 0 ? (realized / costBasis) * 100 : 0;
   const warning =
     remaining > 1e-9
@@ -94,7 +104,7 @@ export function replay(trades: StockTrade[]): {
 
     // sell: FIFO 消耗
     const lots = lotsByKey.get(key) ?? [];
-    const settled = consumeLotsFifo(lots, t.qty, t.price, t.fees ?? 0);
+    const settled = consumeLotsFifo(lots, t.qty, t.price, t.fees ?? 0, contractMultiplier(ticker));
     enrichedTrades.push({ ...t, ...settled });
   }
 
@@ -145,7 +155,7 @@ export function computeCashBalance(
     add(c.account ?? "TFSA", c.currency, c.type === "deposit" ? c.amount : -c.amount);
   }
   for (const t of trades) {
-    const notional = t.qty * t.price + (t.side === "buy" ? t.fees : -t.fees);
+    const notional = t.qty * t.price * contractMultiplier(t.ticker) + (t.side === "buy" ? t.fees : -t.fees);
     add(t.account ?? "TFSA", t.currency, t.side === "buy" ? -notional : notional);
   }
   return bal;
@@ -208,7 +218,7 @@ export function matchSell(
   fees: number
 ): { realized_pnl: number; realized_pct: number; warning?: string } {
   const lots = position ? position.lots.map((l) => ({ ...l })) : [];
-  return consumeLotsFifo(lots, qty, price, fees);
+  return consumeLotsFifo(lots, qty, price, fees, contractMultiplier(position?.ticker ?? ""));
 }
 
 export interface Quote {
@@ -218,40 +228,33 @@ export interface Quote {
 }
 
 /**
- * 今日盈亏(移植自 portfolio.html computeDayPnl):
- *   隔夜持有部分: (live-pc) * qty_overnight
- *   当日买入部分: (live-buy_price) * qty_buy
- *   当日卖出部分: (sell_price-pc) * qty_sell(已实现)
- * 百分比基准 = pc*qty_at_pc_close + 当日买入名义本金
+ * 今日盈亏——只反映当前实际持有的这批 lot,不管当天有没有做过已经平仓的日内交易:
+ *   lot 是当天(交易日)买入的: (live-lot.price) * lot.qty
+ *   lot 是隔夜持有的: (live-pc) * lot.qty
+ * 百分比基准 = 各 lot 的名义成本(当天用买入价,隔夜用前收盘价)之和
  */
 export function computeDayPnl(
   position: Position,
   live: number | null,
   pc: number | null,
-  todayTrades: StockTrade[]
+  todayStr: string
 ): { dayPnl: number | null; dayPct: number | null } {
-  if (live === null || pc === null) return { dayPnl: null, dayPct: null };
+  if (live === null) return { dayPnl: null, dayPct: null };
 
-  const matches = todayTrades.filter(
-    (t) => t.ticker === position.ticker && t.currency === position.currency && (t.account ?? "TFSA") === position.account
-  );
-  let bought = 0;
-  let sold = 0;
-  let buyNotional = 0;
-  let cashFlow = 0;
-  for (const t of matches) {
-    if (t.side === "buy") {
-      bought += t.qty;
-      buyNotional += t.qty * t.price;
-      cashFlow -= t.qty * t.price;
+  const multiplier = contractMultiplier(position.ticker);
+  let dayPnl = 0;
+  let baseline = 0;
+  for (const lot of position.lots) {
+    const isToday = lot.ts.slice(0, 10) === todayStr;
+    if (isToday) {
+      dayPnl += (live - lot.price) * lot.qty * multiplier;
+      baseline += lot.price * lot.qty * multiplier;
     } else {
-      sold += t.qty;
-      cashFlow += t.qty * t.price;
+      if (pc === null) return { dayPnl: null, dayPct: null };
+      dayPnl += (live - pc) * lot.qty * multiplier;
+      baseline += pc * lot.qty * multiplier;
     }
   }
-  const qtyAtPc = position.qty - bought + sold;
-  const dayPnl = live * position.qty + cashFlow - pc * qtyAtPc;
-  const baseline = pc * qtyAtPc + buyNotional;
   const dayPct = baseline > 0 ? (dayPnl / baseline) * 100 : null;
   return {
     dayPnl: Math.round(dayPnl * 100) / 100,

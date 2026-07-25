@@ -4,6 +4,7 @@
 //
 // USD 报价用 Finnhub(key 存在 edge function secret,不进浏览器);
 // CAD 报价 + FX + 盘前盘后覆盖用雅虎财经公开 chart 接口(和 yfinance 同源,免 key)。
+// 期权(ticker 是"TSLA Jul 27 $410 Call"这种自由文本)解析成 OCC 合约代码后走同一个 chart 接口,免 key。
 
 import "jsr:@supabase/functions-js/edge-runtime.d.ts";
 
@@ -138,6 +139,80 @@ async function yfExtendedQuote(ticker: string): Promise<[number | null, number |
   return [ext, prevClose];
 }
 
+// ---------- 期权报价(雅虎 chart 接口,免 key,和股票走同一个接口) ----------
+//
+// 期权 ticker 存的是自由文本,形如 "TSLA Jul 27 $410 Call"(标的 + 到期月日 + 行权价 + 方向,
+// 没有年份——年份靠"离现在最近的未来同月日"推断)。解析出来后拼成 OCC 合约代码
+// (如 TSLA260727C00410000),雅虎的 chart 接口对期权合约代码一样有效——不需要
+// 期权链接口那套要现换 crumb 的反爬机制,复用 fetchChart/lastValid,还顺带拿到了
+// 真正的"前收盘价"(期权链接口的 change/previousClose 对冷门合约常年是 0,不可靠)。
+
+interface ParsedOption {
+  underlying: string;
+  month: number; // 0-based
+  day: number;
+  strike: number;
+  right: "call" | "put";
+}
+
+const MONTH_NAMES: Record<string, number> = {
+  jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
+  jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,
+};
+
+function parseOptionTicker(ticker: string): ParsedOption | null {
+  const m = ticker
+    .trim()
+    .match(/^([A-Za-z.]{1,6})\s+([A-Za-z]{3})[a-z]*\s+(\d{1,2})\s+\$(\d+(?:\.\d+)?)\s+(Call|Put)$/i);
+  if (!m) return null;
+  const month = MONTH_NAMES[m[2].toLowerCase()];
+  if (month === undefined) return null;
+  return {
+    underlying: m[1].toUpperCase(),
+    month,
+    day: Number(m[3]),
+    strike: Number(m[4]),
+    right: m[5].toLowerCase() as "call" | "put",
+  };
+}
+
+/** 找到离现在最近的、匹配 month/day 的未来日期(处理跨年)。 */
+function nearestFutureDate(month: number, day: number): Date {
+  const now = new Date();
+  let candidate = new Date(Date.UTC(now.getUTCFullYear(), month, day));
+  const threeDaysAgo = new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000);
+  if (candidate < threeDaysAgo) candidate = new Date(Date.UTC(now.getUTCFullYear() + 1, month, day));
+  return candidate;
+}
+
+/** OCC 合约代码:标的 + YYMMDD + C/P + 行权价×1000(补零到 8 位)。 */
+function toOccSymbol(parsed: ParsedOption): string {
+  const target = nearestFutureDate(parsed.month, parsed.day);
+  const yy = String(target.getUTCFullYear()).slice(-2);
+  const mm = String(target.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(target.getUTCDate()).padStart(2, "0");
+  const right = parsed.right === "call" ? "C" : "P";
+  const strikeCode = String(Math.round(parsed.strike * 1000)).padStart(8, "0");
+  return `${parsed.underlying}${yy}${mm}${dd}${right}${strikeCode}`;
+}
+
+async function getOptionQuote(ticker: string): Promise<Quote | null> {
+  const parsed = parseOptionTicker(ticker);
+  if (!parsed) return null;
+  // 期权成交不像股票那样天天都有,拉长一点范围以防最近几天没有成交记录
+  const bars = await fetchChart(toOccSymbol(parsed), "1mo", "1d");
+  if (!bars) return null;
+  const lastClose = lastValid(bars.close);
+  if (!lastClose) return null;
+  const idx = lastClose.index;
+  const prevClose = idx > 0 ? lastValid(bars.close.slice(0, idx)) : null;
+  return {
+    c: lastClose.value,
+    o: bars.open[idx] ?? lastClose.value,
+    pc: prevClose ? prevClose.value : null,
+  };
+}
+
 // ---------- USD 报价(Finnhub + 盘前盘后覆盖) ----------
 
 async function getUsdQuote(ticker: string, finnhubKey: string): Promise<Quote | null> {
@@ -179,7 +254,9 @@ Deno.serve(async (req: Request) => {
     const finnhubKey = Deno.env.get("FINNHUB_API_KEY") ?? "";
 
     const [usdResults, cadResults, fx] = await Promise.all([
-      Promise.all((usdTickers as string[]).map((t) => getUsdQuote(t, finnhubKey))),
+      Promise.all(
+        (usdTickers as string[]).map((t) => (parseOptionTicker(t) ? getOptionQuote(t) : getUsdQuote(t, finnhubKey)))
+      ),
       Promise.all((cadTickers as string[]).map((t) => getCadQuote(t))),
       getFx(),
     ]);

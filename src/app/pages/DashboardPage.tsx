@@ -10,8 +10,12 @@ import {
   fetchDashboardData,
   fmtCad,
   type DashboardData,
+  type LiveQuote,
   type Scope,
 } from "@/app/lib/dashboardData";
+import { computePositions } from "@/app/lib/stockPositions";
+import { fetchQuotes } from "@/app/lib/stockApi";
+import { marketSessionDate } from "@/app/lib/marketTime";
 
 const mono = { fontFamily: "'JetBrains Mono', monospace" };
 const display = { fontFamily: "'Exo 2', sans-serif" };
@@ -161,8 +165,14 @@ function CalendarView(props: {
 
 // ---------- 选中日明细 ----------
 
-function DayDetail(props: { date: string | null; data: DashboardData; scope: Scope }) {
-  const { date, data, scope } = props;
+function DayDetail(props: {
+  date: string | null;
+  data: DashboardData;
+  scope: Scope;
+  liveQuotes: Map<string, LiveQuote> | null;
+  todaySessionDate: string;
+}) {
+  const { date, data, scope, liveQuotes, todaySessionDate } = props;
 
   const box = {
     background: "rgba(10,14,28,0.82)",
@@ -181,7 +191,8 @@ function DayDetail(props: { date: string | null; data: DashboardData; scope: Sco
 
   const txns = scope !== "stock" ? data.transactions.filter((t) => t.date === date) : [];
   const cashEvents = scope !== "daily" ? data.cash.filter((c) => c.date === date) : [];
-  const tickerPnls = scope !== "daily" ? computeStockDayPnl(data, date) : [];
+  const tickerPnls =
+    scope !== "daily" ? computeStockDayPnl(data, date, date === todaySessionDate ? liveQuotes ?? undefined : undefined) : [];
 
   const snapIdx = data.snapshots.findIndex((s) => s.date === date);
   const snap = snapIdx >= 0 ? data.snapshots[snapIdx] : null;
@@ -301,11 +312,33 @@ export default function DashboardPage({ initialData }: { initialData?: Dashboard
   const now = new Date();
   const [ym, setYm] = useState({ year: now.getFullYear(), month: now.getMonth() });
   const [selected, setSelected] = useState<string | null>(now.toISOString().slice(0, 10));
+  const [liveQuotes, setLiveQuotes] = useState<Map<string, LiveQuote> | null>(null);
+  const todaySessionDate = marketSessionDate();
 
   useEffect(() => {
     if (initialData) return;
     fetchDashboardData().then(setData).catch((e) => setError(String(e.message ?? e)));
   }, [initialData]);
+
+  // 只在选中日就是当前交易日时才用得上——给"当前交易日"的持仓盈亏兜底一份实时行情,
+  // 覆盖外部快照可能没跟上新导入交易的空窗(见 computeStockDayPnl 里的价格优先级)。
+  useEffect(() => {
+    if (!data) return;
+    const positions = computePositions(data.trades);
+    const usdTickers = [...new Set(positions.filter((p) => p.currency === "USD").map((p) => p.ticker))];
+    const cadTickers = [...new Set(positions.filter((p) => p.currency === "CAD").map((p) => p.ticker))];
+    if (usdTickers.length === 0 && cadTickers.length === 0) return;
+    fetchQuotes(usdTickers, cadTickers)
+      .then((q) => {
+        const map = new Map<string, LiveQuote>();
+        for (const [ticker, quote] of Object.entries(q.usd)) if (quote) map.set(`${ticker}|USD`, quote);
+        for (const [ticker, quote] of Object.entries(q.cad)) if (quote) map.set(`${ticker}|CAD`, quote);
+        setLiveQuotes(map);
+      })
+      .catch(() => {
+        // 拿不到实时行情就算了,退回快照/成交价的兜底逻辑
+      });
+  }, [data]);
 
   const dayAgg = useMemo(() => (data ? aggregateByDay(data) : new Map()), [data]);
   const totals = useMemo(() => (data ? computeTotals(data) : null), [data]);
@@ -400,7 +433,13 @@ export default function DashboardPage({ initialData }: { initialData?: Dashboard
                 onSelect={setSelected}
                 onNav={navMonth}
               />
-              <DayDetail date={selected} data={data} scope={scope} />
+              <DayDetail
+                date={selected}
+                data={data}
+                scope={scope}
+                liveQuotes={liveQuotes}
+                todaySessionDate={todaySessionDate}
+              />
             </div>
           </>
         )}

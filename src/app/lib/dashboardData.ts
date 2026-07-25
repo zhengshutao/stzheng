@@ -1,4 +1,5 @@
 import { supabase } from "@/app/lib/supabase";
+import { contractMultiplier, replay } from "@/app/lib/stockPositions";
 
 // ---------- 行类型(对应 Supabase 表) ----------
 
@@ -191,6 +192,11 @@ function prevDateStr(date: string): string {
   return d.toISOString().slice(0, 10);
 }
 
+export interface LiveQuote {
+  c: number;
+  pc: number | null;
+}
+
 /**
  * 某一天里,每个 ticker(不分账户)的盈亏,折算 CAD。
  * 用快照里当天/前一天的收盘价(每 ticker+currency 一价) + 当天成交,
@@ -199,25 +205,44 @@ function prevDateStr(date: string): string {
  *   当日买入 = bought * (today_px - buy_avg)
  *   当日卖出 = sold * (sell_avg - today_px)
  * 当天清仓(收盘快照里已不存在)时,用当天卖出均价代替 today_px。
+ *
+ * liveQuotes 只在 date 就是当前交易日时才该传——用实时行情兜底快照缺的价格
+ * (比如新导入、快照还没跟上的 ticker),历史日期不适用实时价,调用方不传就行。
  */
-export function computeStockDayPnl(data: DashboardData, date: string): TickerDayPnl[] {
+export function computeStockDayPnl(
+  data: DashboardData,
+  date: string,
+  liveQuotes?: Map<string, LiveQuote>
+): TickerDayPnl[] {
   const snap = data.snapshots.find((s) => s.date === date);
   const prevSnap = data.snapshots.find((s) => s.date === prevDateStr(date));
   const todayPx = new Map<string, number>();
   const prevPx = new Map<string, number>();
-  const prevQty = new Map<string, number>();
+  // key 统一大写——replay() 对 ticker 做过 toUpperCase(),trades/snapshot 里的原始大小写
+  // 不一定一致(比如期权 ticker 是手输的自由文本 "TSLA Jul 27 $410 Call"),大小写不统一会导致
+  // 同一个仓位在 oldQtyByKey(来自 replay)和 byKey(来自原始成交记录)里被当成两个不同的 key,
+  // 拆成两行显示。
   for (const p of snap?.positions ?? []) {
-    todayPx.set(`${p.ticker}|${p.currency}`, p.price);
+    todayPx.set(`${p.ticker.toUpperCase()}|${p.currency}`, p.price);
   }
   for (const p of prevSnap?.positions ?? []) {
-    prevPx.set(`${p.ticker}|${p.currency}`, p.price);
-    prevQty.set(`${p.ticker}|${p.currency}`, p.qty);
+    prevPx.set(`${p.ticker.toUpperCase()}|${p.currency}`, p.price);
+  }
+
+  // 昨日持仓数量不用快照里的 positions(那是外部脚本推的,可能滞后于 stock_trades——
+  // 比如某只票早就被真实成交平仓了,快照还在按老仓位继续算账面盈亏)。
+  // 改用真实成交记录做 FIFO 回放,算出这一天开盘前实际还剩多少股,更可靠。
+  const { positions: priorPositions } = replay(data.trades.filter((t) => t.date < date));
+  const oldQtyByKey = new Map<string, number>();
+  for (const p of priorPositions) {
+    const key = `${p.ticker}|${p.currency}`;
+    oldQtyByKey.set(key, (oldQtyByKey.get(key) ?? 0) + p.qty);
   }
 
   const todayTrades = data.trades.filter((t) => t.date === date);
   const byKey = new Map<string, { bought: number; buyNotional: number; sold: number; sellNotional: number }>();
   for (const t of todayTrades) {
-    const key = `${t.ticker}|${t.currency}`;
+    const key = `${t.ticker.toUpperCase()}|${t.currency}`;
     const agg = byKey.get(key) ?? { bought: 0, buyNotional: 0, sold: 0, sellNotional: 0 };
     if (t.side === "buy") {
       agg.bought += t.qty;
@@ -232,20 +257,37 @@ export function computeStockDayPnl(data: DashboardData, date: string): TickerDay
   const fx = snap?.fx_usdcad ?? prevSnap?.fx_usdcad ?? 1.37;
   const toCad = (amount: number, currency: string) => (currency === "CAD" ? amount : amount * fx);
 
-  const keys = new Set<string>([...todayPx.keys(), ...prevPx.keys(), ...byKey.keys()]);
+  // ticker 范围只看"真实回放出来的昨日持仓"+"今天真实成交过的",
+  // 不再直接并入快照 positions 里的 key——避免快照里那些早就平仓、
+  // 但外部脚本还没同步到的"幽灵仓位"每天都冒出一笔看似真实的浮动盈亏。
+  const keys = new Set<string>([...oldQtyByKey.keys(), ...byKey.keys()]);
   const out: TickerDayPnl[] = [];
   for (const key of keys) {
     const [ticker, currency] = key.split("|");
     const trade = byKey.get(key);
     const bought = trade?.bought ?? 0;
     const sold = trade?.sold ?? 0;
-    const buyAvg = bought > 0 ? trade!.buyNotional / bought : 0;
-    const sellAvg = sold > 0 ? trade!.sellNotional / sold : 0;
-    const oldQty = prevQty.get(key) ?? 0;
-    const todayPrice = todayPx.get(key) ?? sellAvg ?? prevPx.get(key) ?? 0;
-    const prevPrice = prevPx.get(key) ?? buyAvg ?? todayPrice;
-
-    const pnl = oldQty * (todayPrice - prevPrice) + bought * (todayPrice - buyAvg) + sold * (sellAvg - todayPrice);
+    // buyAvg/sellAvg 缺成交时是 null(不是 0),这样下面的 ?? 链在快照缺数据时才会
+    // 老老实实往下找,而不是把"没有卖出"误当成"当天价格是 0"。
+    const buyAvg = bought > 0 ? trade!.buyNotional / bought : null;
+    const sellAvg = sold > 0 ? trade!.sellNotional / sold : null;
+    const oldQty = oldQtyByKey.get(key) ?? 0;
+    const live = liveQuotes?.get(key);
+    // 价格来源优先级:快照(如果有)> 实时行情(仅当天有传)> 当天实际成交价 > 成本价。
+    const todayPrice = todayPx.get(key) ?? live?.c ?? sellAvg ?? prevPx.get(key) ?? live?.pc ?? buyAvg ?? null;
+    const prevPrice = prevPx.get(key) ?? live?.pc ?? buyAvg ?? todayPrice ?? null;
+    // 如果连这些都拿不到(比如快照数据没跟上新导入的交易,也没传实时行情兜底),
+    // 就没有任何可靠的当日价格来源——按成本价打平(当日盈亏记 0),
+    // 而不是像之前那样悄悄假设成 $0/股,平白算出一笔离谱的"亏损"。
+    // 期权按张(contract)交易,一张对应 100 股标的,价格是"每股"权利金,换算成金额要乘以 100。
+    const multiplier = contractMultiplier(ticker);
+    const pnl =
+      todayPrice === null || prevPrice === null
+        ? 0
+        : (oldQty * (todayPrice - prevPrice) +
+            (buyAvg !== null ? bought * (todayPrice - buyAvg) : 0) +
+            (sellAvg !== null ? sold * (sellAvg - todayPrice) : 0)) *
+          multiplier;
     if (Math.abs(pnl) < 0.005 && bought === 0 && sold === 0) continue;
     out.push({ ticker, currency, qty: oldQty + bought - sold, pnl: Math.round(toCad(pnl, currency) * 100) / 100 });
   }
