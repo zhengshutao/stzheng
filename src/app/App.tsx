@@ -5,6 +5,9 @@ import heroBg from "@/imports/890e88bf-8d8b-40b5-94af-aaa454a0cfb3.mp4";
 import uwSeal from "@/assets/uw-seal.svg";
 import avatarImg from "@/assets/avatar.jpg";
 import gradAvatar from "@/assets/grad-avatar.png";
+import aecDailyLogo from "@/assets/logos/aec-daily-logo.jpeg";
+import adpLogo from "@/assets/logos/adp-logo.jpg";
+import netdragonLogo from "@/assets/logos/netdragon-logo.png";
 import { supabase } from "@/app/lib/supabase";
 import { useAuth } from "@/app/lib/AuthContext";
 import {
@@ -22,35 +25,51 @@ const SECTION_IDS = ["home", "profile", "journey", "skills", "projects", "contac
 const JOURNEY = [
   {
     year: "2024",
-    period: "Co-op \nJan – Apr 2023\nFull-time \nMay 2024 – Present",
-    role: "Web Developer",
-    company: "AEC Daily Inc · Newmarket, ON",
+    period: "Full-time \nMay 2024 – Present",
+    role: "Full Stack Engineer",
+    company: "AEC Daily · Newmarket, ON",
+    logo: aecDailyLogo,
     bullets: [
-      "Investigated and remediated two blind SQL injection vulnerabilities, eliminating the attack surface by sourcing user identity from session state instead of client input; designed a centralized, boundary-level parameter sanitization layer replacing 4 scattered validation points, with sanitization ordering deliberately sequenced around session and application-stack initialization to prevent unsanitized data propagation.",
-      "Identified and fixed a privilege-escalation vulnerability where staff access was inferred from unverified email domain matching, replacing it with an explicit authorization flag in the user schema.",
-      "Designed an ordered multi-language user preference model, enabling graceful content fallback when courses lacked translations in a user's top-preferred language; extended the gettext-based templating system to render UI text through the same preference chain, unifying content and interface localization under one data-driven mechanism.",
-      "Extended the Live Session Report with multi-session Excel export, and optimized the Link Report to handle large datasets by capping results at 1000 rows with batched cell styling; eliminated a redundant duplicate-processing loop in the Online Event Report to reduce unnecessary computation.",
+      "Led development and delivery of multiple white-label e-university and compliance-training portals, owning the application, PostgreSQL database, tenant configuration, and deployment stack; built hostname-based routing that loads client-specific branding and configuration while sharing centralized course data and core functionality, and standardized provisioning across config, templates, data setup, and release rollout.",
+      "Investigated and remediated two blind SQL injection vulnerabilities, eliminating the attack surface by sourcing user identity from session state instead of client input; designed a centralized, boundary-level parameter sanitization layer replacing 4 scattered validation points. Fixed a privilege-escalation vulnerability where staff access was inferred from unverified email domain matching, replacing it with an explicit authorization flag in the user schema.",
+      "Led design and delivery of the platform's internationalization and localization infrastructure, including multilingual content modeling, ordered language preferences, gettext workflows, and localized template rendering; designed a preference chain that falls back to a user's next language when content is unavailable and extended the same logic to interface text, standardizing user-facing strings behind translation tags.",
+      "Audited compliance-critical deadline and completion logic, identifying data-integrity gaps and documenting reproducible cases for engineering follow-up; built automated sanity checks to catch localization and formatting issues before production, and mentored junior developers while coordinating releases.",
+    ],
+  },
+  {
+    year: "2023",
+    period: "Internship\nJan – Apr 2023",
+    role: "Full Stack Engineer Intern",
+    company: "AEC Daily · Newmarket, ON",
+    logo: aecDailyLogo,
+    bullets: [
+      "Developed a dynamic Recommended Courses feature using PHP, Smarty, and SQL, querying course relationships and user-relevant data to surface recommended and related courses and improve content discovery.",
+      "Designed and implemented an interactive \"Leave a Question\" feature on course pages using PHP, Smarty, HTML, and CSS, enabling users to submit inquiries and automatically notifying instructors by email.",
+      "Performed comprehensive black-box testing across the company website, identifying, reproducing, and documenting functional defects and usability issues that contributed to improved product quality and user experience.",
+      "Collaborated with developers to investigate reported defects, validate fixes, and implement system enhancements based on test findings, supporting more reliable releases and continuous product improvement.",
     ],
   },
   {
     year: "2022",
     period: "Co-op\nMay – Aug. 2022",
-    role: "Software Engineer",
+    role: "Software Engineer Intern",
     company: "Lifion by ADP · New York, NY",
+    logo: adpLogo,
     bullets: [
-      "Extended an internal low-code workflow engine used by non-technical staff to define server-side business logic, adding new conditional logic operators to expand the range of business rules users could express without writing code.",
-      "Redesigned the application's output display to surface more detailed execution results, improving visibility into how a configured workflow behaved at runtime.",
-      "Wrote integration tests within the team's existing Jenkins CI pipeline, achieving over 90% coverage of newly introduced functionality to safeguard release stability.",
+      "Extended an internal low-code workflow engine used by non-technical staff to configure server-side business logic, adding conditional operators that expanded the range of business rules users could define without writing code.",
+      "Redesigned the application's results interface to display more detailed workflow execution outputs, improving visibility into runtime behavior and helping users validate and troubleshoot configured workflows.",
+      "Developed integration tests within the team's Jenkins CI pipeline, achieving over 90% test coverage for newly introduced functionality and reducing regression risk during subsequent releases.",
     ],
   },
   {
     year: "2020",
     period: "Co-op\nSept. 2020 – Aug. 2021",
-    role: "Quality Assurance Engineer",
+    role: "Software Test Engineer",
     company: "NetDragon Websoft Holdings · Fuzhou, China",
+    logo: netdragonLogo,
     bullets: [
-      "Built an automated UI testing system for ActivPanel that simulated user button interactions and validated expected on-screen responses, catching functional defects before release.",
-      "Executed a combination of standardized regression test cases and new feature test cases across three product launches, documenting defects in JIRA and producing release-readiness reports to guide go/no-go decisions.",
+      "Built an automated UI testing framework for ActivPanel that simulated user interactions and validated on-screen responses, detecting functional defects before production release and improving confidence in product stability.",
+      "Executed regression and feature testing across three product launches, documented and tracked defects in JIRA, and prepared release-readiness reports to support go/no-go decisions and prioritize critical issues before deployment.",
     ],
   },
 ];
@@ -488,7 +507,7 @@ function ProfileSection() {
 
   const tabContent = [
     {
-      bio: "Software engineer based in Toronto with a B.Math in Computational Mathematics from the University of Waterloo. I build end-to-end digital products — from secure backend APIs and PostgreSQL schemas to mobile apps and AI-integrated features. Currently a Web Developer at AEC Daily Inc.",
+      bio: "Backend-focused Full-Stack Software Engineer with 3+ years of hands-on experience building and maintaining enterprise SaaS, calendar synchronization systems, and production web platforms. Experienced in designing PostgreSQL-backed systems, developing scalable REST APIs, and remediating security vulnerabilities including SQL injection and privilege escalation. Comfortable owning systems end to end—from requirements gathering and schema design through implementation, testing, and deployment—and translating ambiguous business needs into reliable, maintainable solutions.",
       extras: (
         <div className="grid grid-cols-2 gap-3 mt-4">
           {[["SPECIALTY","Full-Stack / Mobile"],["LOCATION","Toronto, Canada"],["STATUS","Open to Work"],["FOCUS","Scalable Web Apps"]].map(([k,v])=>(
@@ -501,20 +520,20 @@ function ProfileSection() {
       ),
     },
     {
-      bio: "I believe great software is a dialogue between technical precision and human empathy. Every system I build starts with a question: what does this person actually need? Code without context is just machinery. I write code that thinks about the person on the other side of the screen.",
+      bio: "I approach engineering with security and correctness first — validating edge cases and data integrity before calling anything done. I like owning systems end to end, from requirements and schema design through implementation, testing, and deployment, not just the code in between. That said, I stay pragmatic: ship a working solution, then iterate, rather than over-engineering upfront. And since most hard problems are really communication problems, I care about turning ambiguous requirements into clear plans and supporting the engineers around me.",
       extras: (
         <div className="flex flex-wrap gap-2 mt-4">
-          {["Human-centered","AI-augmented","Ship fast, learn fast","Design-aware","Async-first","Open source"].map(v=>(
+          {["Security-first","End-to-end ownership","Ship fast, iterate","Data integrity","Mentorship","Clear communication"].map(v=>(
             <span key={v} className="text-[10px] px-3 py-1 rounded-full" style={{ ...mono, background:"rgba(139,92,246,0.12)", color:"#a78bfa", border:"1px solid rgba(139,92,246,0.25)" }}>{v}</span>
           ))}
         </div>
       ),
     },
     {
-      bio: "When not writing code, I'm thinking about storytelling and how technology can be more like art. I collect obscure sci-fi novels, experiment with AI-generated music, and maintain a weekly writing habit. I'm particularly interested in how LLMs change the creative process.",
+      bio: "Outside of work, I'm usually gaming — I keep a running backlog and enjoy digging into systems-heavy titles almost as much as playing them. I also make time to stay active, whether that's the gym or just getting outside. It's a good counterbalance to a day spent debugging: one is about solving problems, the other is about switching my brain off completely.",
       extras: (
         <div className="flex flex-wrap gap-2 mt-4">
-          {["Sci-Fi Novels","AI Music","Digital Philosophy","Cinematography","System Design","Cafe Hopping"].map(v=>(
+          {["Gaming","Fitness","Console Gaming","Weightlifting","Game Backlog","Staying Active"].map(v=>(
             <span key={v} className="text-[10px] px-3 py-1 rounded-full" style={{ ...mono, background:"rgba(96,165,250,0.1)", color:"#93c5fd", border:"1px solid rgba(96,165,250,0.2)" }}>{v}</span>
           ))}
         </div>
@@ -586,7 +605,7 @@ function ProfileSection() {
               <div className="flex-1 min-w-0">
                 <div className="text-[10px] tracking-widest mb-1" style={{ ...mono, color: "#4a5568" }}>DESIGNATION</div>
                 <div className="text-2xl font-black text-white mb-0.5" style={display}>SHUTAO</div>
-                <div className="text-sm mb-2" style={{ ...body, color: "#a78bfa" }}>Software Engineer · Web Developer</div>
+                <div className="text-sm mb-2" style={{ ...body, color: "#a78bfa" }}>Software Engineer · Full Stack Engineer</div>
                 <div className="flex items-center gap-1 text-xs" style={{ ...mono, color: "#6b7fa8" }}>
                   <MapPin size={11} />
                   Toronto, CA
@@ -707,7 +726,6 @@ function JourneySection() {
           transition={{ duration: 0.6 }}
           className="mb-14"
         >
-          <div className="text-[11px] tracking-widest mb-3" style={{ ...mono, color: "#4a5568" }}>// SECTION 03</div>
           <h2 className="font-black text-white leading-none" style={{ ...display, fontSize: "clamp(52px,8vw,96px)" }}>
             JOURNEY
           </h2>
@@ -761,8 +779,18 @@ function JourneySection() {
 
               {/* Content */}
               <div className="flex-1 min-w-0">
-                <div className="text-base font-semibold text-white mb-0.5" style={display}>{item.role}</div>
-                <div className="text-[11px] mb-4 tracking-wide" style={{ ...mono, color: "#60a5fa" }}>{item.company}</div>
+                <div className="flex items-center gap-3 mb-4">
+                  <div
+                    className="flex-shrink-0 w-9 h-9 rounded-full flex items-center justify-center overflow-hidden bg-white"
+                    style={{ boxShadow: "0 0 12px rgba(139,92,246,0.1)" }}
+                  >
+                    <img src={item.logo} alt={`${item.company} logo`} className="w-full h-full object-contain p-1" />
+                  </div>
+                  <div>
+                    <div className="text-base font-semibold text-white mb-0.5" style={display}>{item.role}</div>
+                    <div className="text-[11px] tracking-wide" style={{ ...mono, color: "#60a5fa" }}>{item.company}</div>
+                  </div>
+                </div>
 
                 <ul className="space-y-2.5">
                   {item.bullets.map((b, j) => (
@@ -784,8 +812,12 @@ function JourneySection() {
           transition={{ delay: 0.55, duration: 0.55 }}
           className="mt-16"
         >
-          <div className="text-[10px] tracking-[0.25em] mb-6" style={{ ...mono, color: "#4a5568" }}>
+          <h2 className="font-black text-white leading-none" style={{ ...display, fontSize: "clamp(52px,8vw,96px)" }}>
             EDUCATION
+          </h2>
+          <div className="flex items-center gap-3 mt-2 mb-8">
+            <span className="text-4xl font-black" style={{ ...display, color: "#8b5cf6" }}>学历_</span>
+            <div className="h-px flex-1 max-w-xs" style={{ background: "linear-gradient(to right,rgba(139,92,246,0.5),transparent)" }} />
           </div>
 
           <div
@@ -872,11 +904,14 @@ function SkillsSection() {
           transition={{ duration: 0.6 }}
           className="mb-14"
         >
-          <div className="text-[11px] tracking-widest mb-3" style={{ ...mono, color: "#4a5568" }}>// SECTION 04</div>
           <h2 className="font-black text-white leading-none" style={{ ...display, fontSize: "clamp(52px,8vw,96px)" }}>
             SKILLS
           </h2>
-          <div className="text-[11px] tracking-widest mt-2" style={{ ...mono, color: "#4a5568" }}>
+          <div className="flex items-center gap-3 mt-2">
+            <span className="text-4xl font-black" style={{ ...display, color: "#8b5cf6" }}>技能_</span>
+            <div className="h-px flex-1 max-w-xs" style={{ background: "linear-gradient(to right,rgba(139,92,246,0.5),transparent)" }} />
+          </div>
+          <div className="text-[11px] tracking-widest mt-3" style={{ ...mono, color: "#4a5568" }}>
             SYSTEM MODULE OVERVIEW · 5 ACTIVE CORES
           </div>
         </motion.div>
@@ -988,10 +1023,13 @@ function ProjectsSection() {
           transition={{ duration: 0.6 }}
           className="mb-12"
         >
-          <div className="text-[11px] tracking-widest mb-3" style={{ ...mono, color: "#4a5568" }}>// SECTION 05</div>
           <h2 className="font-black text-white leading-none" style={{ ...display, fontSize: "clamp(52px,8vw,96px)" }}>
             PROJECTS
           </h2>
+          <div className="flex items-center gap-3 mt-2">
+            <span className="text-4xl font-black" style={{ ...display, color: "#8b5cf6" }}>项目_</span>
+            <div className="h-px flex-1 max-w-xs" style={{ background: "linear-gradient(to right,rgba(139,92,246,0.5),transparent)" }} />
+          </div>
         </motion.div>
 
         {/* Film strip carousel */}
@@ -1172,12 +1210,15 @@ function ContactSection() {
             animate={visible ? { opacity: 1, x: 0 } : {}}
             transition={{ duration: 0.6 }}
           >
-            <div className="text-[11px] tracking-widest mb-4" style={{ ...mono, color: "#4a5568" }}>// SECTION 06</div>
-            <h2 className="font-black text-white leading-none mb-6" style={{ ...display, fontSize: "clamp(40px,6vw,78px)", lineHeight: 1 }}>
+            <h2 className="font-black text-white leading-none mb-4" style={{ ...display, fontSize: "clamp(40px,6vw,78px)", lineHeight: 1 }}>
               LET&apos;S BUILD<br />
               <span style={{ color: "#8b5cf6" }}>SOMETHING</span><br />
               MEANINGFUL
             </h2>
+            <div className="flex items-center gap-3 mb-6">
+              <span className="text-4xl font-black" style={{ ...display, color: "#8b5cf6" }}>联系_</span>
+              <div className="h-px flex-1 max-w-xs" style={{ background: "linear-gradient(to right,rgba(139,92,246,0.5),transparent)" }} />
+            </div>
             <p className="text-sm leading-relaxed mb-8" style={{ ...body, color: "#6b7fa8" }}>
               Have a project in mind, want to collaborate, or just want to talk about AI and software? My inbox is always open.
             </p>
