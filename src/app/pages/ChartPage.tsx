@@ -2,7 +2,7 @@
 // 颜色按 A 股习惯:涨红跌绿。买卖点画在成交价上:同一根 K 线里有多笔成交标 T,只有一笔标 B / S。
 // 只做美股(USD、非期权);K 线数据来自 stock-candles edge function,盘中每 15 秒刷新一次。
 
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { ArrowDown, ArrowLeft, ArrowUp, Eraser, GripVertical, Pencil, X, Heart, Plus, Settings, Minus, MousePointer2, MoveUpRight, RectangleHorizontal, RefreshCw, Trash2 } from "lucide-react";
 import {
@@ -13,16 +13,16 @@ import {
   LineSeries,
   LineStyle,
   createChart,
-  createSeriesMarkers,
+  type AutoscaleInfo,
   type IChartApi,
   type IPriceLine,
   type ISeriesApi,
-  type ISeriesMarkersPluginApi,
   type MouseEventParams,
   type Time,
   type UTCTimestamp,
 } from "lightweight-charts";
 import DashboardNavbar from "./DashboardNavbar";
+import { TradeMarksPrimitive } from "@/app/lib/chartMarks";
 import { fetchAll, type StockSplit, type StockTrade } from "@/app/lib/dashboardData";
 import { computePositions } from "@/app/lib/stockPositions";
 import { fetchQuotes, type QuotesResponse } from "@/app/lib/stockApi";
@@ -45,10 +45,12 @@ import {
   fetchSparks,
   groupTradesByBar,
   isDaily,
+  previousDayClose,
   regularSessionOnly,
   type BarTrades,
   type Candle,
   type CandleData,
+  type MarkKind,
   type Period,
   type Spark,
 } from "@/app/lib/candles";
@@ -73,7 +75,9 @@ const BG = "#060a14";
 const BORDER = "rgba(139,92,246,0.18)";
 const EMA_COLORS: Record<number, string> = { 5: "#f5c542", 10: "#38bdf8", 20: "#c084fc", 50: "#2dd4bf" };
 // 买卖点故意不用 K 线的红/绿,也避开 EMA 的黄/天蓝/紫/青,压在 K 线上也看得清
-const MARK_COLORS = { B: "#2f7bff", S: "#e040fb", T: "#ff9800" } as const;
+// 默认值,设置里可以改
+type MarkColors = Record<MarkKind, string>;
+const DEFAULT_MARK_COLORS: MarkColors = { B: "#2f7bff", S: "#e040fb", T: "#ff9800" };
 const MARK_TEXT = { B: "B", S: "S", T: "T" } as const;
 
 /**
@@ -121,15 +125,23 @@ function readPeriod(): Period {
 interface ChartSettings {
   /** 分钟线/小时线显示盘前盘后 */
   extendedHours: boolean;
+  /** 默认视野:每根 K 线占的像素宽 */
+  barSpacing: number;
+  /** 默认视野:最后一根 K 线放在图宽的百分之几处,右边留白 */
+  lastBarAt: number;
+  /** 买卖点颜色 */
+  markColors: MarkColors;
 }
 
 const SETTINGS_KEY = "chart.settings";
-const DEFAULT_SETTINGS: ChartSettings = { extendedHours: true };
+const DEFAULT_SETTINGS: ChartSettings = { extendedHours: true, barSpacing: 8, lastBarAt: 70, markColors: DEFAULT_MARK_COLORS };
 
 function readSettings(): ChartSettings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
-    return raw ? { ...DEFAULT_SETTINGS, ...JSON.parse(raw) } : DEFAULT_SETTINGS;
+    if (!raw) return DEFAULT_SETTINGS;
+    const saved = JSON.parse(raw);
+    return { ...DEFAULT_SETTINGS, ...saved, markColors: { ...DEFAULT_MARK_COLORS, ...saved.markColors } };
   } catch {
     return DEFAULT_SETTINGS;
   }
@@ -165,51 +177,385 @@ function Toggle({ checked, onChange, label, hint }: { checked: boolean; onChange
   );
 }
 
-function SettingsMenu({ settings, onChange }: { settings: ChartSettings; onChange: (s: ChartSettings) => void }) {
+function Slider({
+  label,
+  hint,
+  value,
+  min,
+  max,
+  step = 1,
+  unit,
+  onChange,
+}: {
+  label: string;
+  hint?: string;
+  value: number;
+  min: number;
+  max: number;
+  step?: number;
+  unit: string;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <label className="block select-none">
+      <span className="flex items-baseline justify-between gap-4">
+        <span className="text-xs" style={{ color: TEXT }}>
+          {label}
+        </span>
+        <span className="text-xs" style={{ ...mono, color: SUB }}>
+          {value}
+          {unit}
+        </span>
+      </span>
+      {hint && (
+        <span className="block text-[10px] mt-0.5" style={{ color: MUTED }}>
+          {hint}
+        </span>
+      )}
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="w-full mt-2 accent-violet-500"
+      />
+    </label>
+  );
+}
+
+const MARK_LABELS: { kind: MarkKind; label: string }[] = [
+  { kind: "B", label: "买入" },
+  { kind: "S", label: "卖出" },
+  { kind: "T", label: "同一根K线多笔" },
+];
+
+// ---------- 颜色选择器(自己画的,浏览器自带的加不了保存/取消) ----------
+
+type Hsv = { h: number; s: number; v: number };
+
+function hexToRgb(hex: string): [number, number, number] {
+  const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+function rgbToHex(r: number, g: number, b: number): string {
+  return "#" + [r, g, b].map((x) => Math.round(x).toString(16).padStart(2, "0")).join("");
+}
+
+function rgbToHsv(r: number, g: number, b: number): Hsv {
+  r /= 255;
+  g /= 255;
+  b /= 255;
+  const max = Math.max(r, g, b);
+  const d = max - Math.min(r, g, b);
+  let h = 0;
+  if (d) {
+    if (max === r) h = ((g - b) / d) % 6;
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h = (h * 60 + 360) % 360;
+  }
+  return { h, s: max ? d / max : 0, v: max };
+}
+
+function hsvToRgb({ h, s, v }: Hsv): [number, number, number] {
+  const f = (n: number) => {
+    const k = (n + h / 60) % 6;
+    return (v - v * s * Math.max(0, Math.min(k, 4 - k, 1))) * 255;
+  };
+  return [f(5), f(3), f(1)];
+}
+
+/** 在一个元素上按住拖动,回调 0–1 的相对坐标 */
+function useDrag(onMove: (x: number, y: number) => void) {
+  return (e: ReactPointerEvent<HTMLDivElement>) => {
+    const el = e.currentTarget;
+    el.setPointerCapture(e.pointerId);
+    const emit = (ev: { clientX: number; clientY: number }) => {
+      const r = el.getBoundingClientRect();
+      onMove(Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width)), Math.min(1, Math.max(0, (ev.clientY - r.top) / r.height)));
+    };
+    emit(e);
+    const move = (ev: PointerEvent) => emit(ev);
+    const up = () => {
+      el.removeEventListener("pointermove", move);
+      el.removeEventListener("pointerup", up);
+    };
+    el.addEventListener("pointermove", move);
+    el.addEventListener("pointerup", up);
+  };
+}
+
+function ColorPopover({ value, onSave, onCancel }: { value: string; onSave: (hex: string) => void; onCancel: () => void }) {
+  const [hsv, setHsv] = useState<Hsv>(() => rgbToHsv(...hexToRgb(value)));
+  const rgb = hsvToRgb(hsv).map(Math.round) as [number, number, number];
+  const hex = rgbToHex(...rgb);
+  const [hexInput, setHexInput] = useState(hex);
+  useEffect(() => setHexInput(hex), [hex]);
+  useEffect(() => {
+    // 捕获阶段拦下 Esc,只关颜色框,不关整个设置窗口
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        onCancel();
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [onCancel]);
+
+  const dragSv = useDrag((x, y) => setHsv((c) => ({ ...c, s: x, v: 1 - y })));
+  const dragHue = useDrag((x) => setHsv((c) => ({ ...c, h: x * 359.9 })));
+  const setChannel = (i: number, raw: string) => {
+    const next = [...rgb] as [number, number, number];
+    next[i] = Math.min(255, Math.max(0, Number(raw) || 0));
+    setHsv(rgbToHsv(...next));
+  };
+  const hueColor = rgbToHex(...hsvToRgb({ h: hsv.h, s: 1, v: 1 }));
+  const inputStyle = { ...mono, color: TEXT, background: "rgba(139,92,246,0.06)", border: `1px solid ${BORDER}` };
+
+  return (
+    <div
+      className="mt-3 w-64 rounded-lg p-3 space-y-3"
+      style={{ background: "rgba(10,14,28,0.99)", border: `1px solid ${BORDER}`, boxShadow: "0 8px 32px rgba(0,0,0,0.6)" }}
+    >
+      <div
+        className="relative h-36 rounded cursor-crosshair touch-none"
+        style={{ background: `linear-gradient(to top, #000, transparent), linear-gradient(to right, #fff, ${hueColor})` }}
+        onPointerDown={dragSv}
+      >
+        <span
+          className="absolute w-3.5 h-3.5 -ml-[7px] -mt-[7px] rounded-full border-2 border-white pointer-events-none"
+          style={{ left: `${hsv.s * 100}%`, top: `${(1 - hsv.v) * 100}%`, boxShadow: "0 0 0 1px rgba(0,0,0,0.5)" }}
+        />
+      </div>
+      <div className="flex items-center gap-3">
+        <span className="w-7 h-7 rounded-full shrink-0" style={{ background: hex, border: `1px solid ${BORDER}` }} />
+        <div
+          className="relative flex-1 h-3 rounded-full cursor-pointer touch-none"
+          style={{ background: "linear-gradient(to right, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00)" }}
+          onPointerDown={dragHue}
+        >
+          <span
+            className="absolute top-1/2 w-3.5 h-3.5 -ml-[7px] -mt-[7px] rounded-full border-2 border-white pointer-events-none"
+            style={{ left: `${(hsv.h / 360) * 100}%`, background: hueColor, boxShadow: "0 0 0 1px rgba(0,0,0,0.5)" }}
+          />
+        </div>
+      </div>
+      <div className="grid grid-cols-5 gap-1.5 text-center">
+        <label className="col-span-2 text-[9px]" style={{ color: MUTED }}>
+          <input
+            value={hexInput}
+            onChange={(e) => {
+              setHexInput(e.target.value);
+              const v = e.target.value.trim().replace(/^#?/, "#");
+              if (/^#[0-9a-f]{6}$/i.test(v)) setHsv(rgbToHsv(...hexToRgb(v)));
+            }}
+            className="w-full rounded px-1 py-1 text-[11px] text-center outline-none focus:border-violet-500"
+            style={inputStyle}
+            aria-label="HEX"
+          />
+          HEX
+        </label>
+        {(["R", "G", "B"] as const).map((ch, i) => (
+          <label key={ch} className="text-[9px]" style={{ color: MUTED }}>
+            <input
+              type="number"
+              min={0}
+              max={255}
+              value={rgb[i]}
+              onChange={(e) => setChannel(i, e.target.value)}
+              className="w-full rounded px-1 py-1 text-[11px] text-center outline-none focus:border-violet-500 [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none"
+              style={inputStyle}
+              aria-label={ch}
+            />
+            {ch}
+          </label>
+        ))}
+      </div>
+      <div className="flex justify-end gap-2 pt-1">
+        <button
+          onClick={onCancel}
+          className="px-3 py-1 rounded text-[11px] transition-colors hover:bg-violet-500/10"
+          style={{ color: SUB, border: `1px solid ${BORDER}` }}
+        >
+          取消
+        </button>
+        <button
+          onClick={() => onSave(hex)}
+          className="px-3 py-1 rounded text-[11px] text-white transition-colors hover:brightness-110"
+          style={{ background: "#8b5cf6", border: "1px solid rgba(139,92,246,0.8)" }}
+        >
+          保存
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function MarkColorPicker({ colors, onChange }: { colors: MarkColors; onChange: (c: MarkColors) => void }) {
+  const [editing, setEditing] = useState<MarkKind | null>(null);
+  const close = useCallback(() => setEditing(null), []);
+  return (
+    <div>
+      <div className="text-xs" style={{ color: TEXT }}>
+        买卖点颜色
+      </div>
+      <div className="flex flex-wrap gap-x-4 gap-y-2 mt-2">
+        {MARK_LABELS.map(({ kind, label }) => (
+          <button
+            key={kind}
+            type="button"
+            onClick={() => setEditing((k) => (k === kind ? null : kind))}
+            className="flex items-center gap-2 select-none text-[11px]"
+            style={{ color: SUB }}
+            aria-label={`${label}颜色`}
+            aria-expanded={editing === kind}
+          >
+            <span
+              className="w-6 h-6 rounded-full shrink-0"
+              style={{ background: colors[kind], border: `1px solid ${editing === kind ? "#fff" : BORDER}` }}
+            />
+            <b style={{ ...mono, color: colors[kind] }}>{kind}</b>
+            {label}
+          </button>
+        ))}
+      </div>
+      {editing && (
+        <ColorPopover
+          key={editing}
+          value={colors[editing]}
+          onCancel={close}
+          onSave={(hex) => {
+            onChange({ ...colors, [editing]: hex });
+            setEditing(null);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+type SettingsSection = "session" | "chart";
+const SETTINGS_SECTIONS: { key: SettingsSection; label: string }[] = [
+  { key: "session", label: "交易时段" },
+  { key: "chart", label: "图表" },
+];
+
+/** 设置窗口。图表里的是默认视野:打开、换周期、点刷新时用;手动拖动/缩放不会改它 */
+function SettingsDialog({ settings, onChange }: { settings: ChartSettings; onChange: (s: ChartSettings) => void }) {
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
+  const [section, setSection] = useState<SettingsSection>("session");
   useEffect(() => {
     if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
-    document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
+    return () => document.removeEventListener("keydown", onKey);
   }, [open]);
   return (
-    <div className="relative" ref={ref}>
+    <>
       <button
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => setOpen(true)}
         className="p-1.5 rounded transition-colors hover:bg-violet-500/10"
         style={{ color: open ? "#fff" : SUB }}
         title="图表设置"
         aria-label="图表设置"
-        aria-expanded={open}
       >
         <Settings size={14} aria-hidden />
       </button>
       {open && (
         <div
-          className="absolute right-0 mt-2 w-64 rounded-lg p-4 space-y-3 z-30"
-          style={{ background: "rgba(10,14,28,0.97)", border: `1px solid ${BORDER}`, boxShadow: "0 8px 32px rgba(0,0,0,0.5)" }}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: "rgba(0,0,0,0.55)" }}
+          onMouseDown={(e) => e.target === e.currentTarget && setOpen(false)}
         >
-          <div className="text-[10px] tracking-widest" style={{ ...mono, color: MUTED }}>
-            图表设置
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="图表设置"
+            className="w-full max-w-lg max-h-full rounded-lg overflow-hidden flex flex-col"
+            style={{ background: "rgba(10,14,28,0.98)", border: `1px solid ${BORDER}`, boxShadow: "0 16px 48px rgba(0,0,0,0.6)" }}
+          >
+            <div className="flex items-center justify-between px-4 py-3" style={{ borderBottom: `1px solid ${BORDER}` }}>
+              <span className="text-[11px] tracking-widest" style={{ ...mono, color: SUB }}>
+                图表设置
+              </span>
+              <button onClick={() => setOpen(false)} className="p-1 rounded hover:bg-violet-500/10" style={{ color: SUB }} aria-label="关闭">
+                <X size={14} aria-hidden />
+              </button>
+            </div>
+            <div className="flex min-h-[220px] overflow-y-auto">
+              <nav className="w-28 shrink-0 p-2 space-y-1" style={{ borderRight: `1px solid ${BORDER}` }}>
+                {SETTINGS_SECTIONS.map((s) => (
+                  <button
+                    key={s.key}
+                    onClick={() => setSection(s.key)}
+                    className="w-full text-left px-2.5 py-1.5 rounded text-xs transition-colors"
+                    style={{
+                      color: section === s.key ? "#fff" : SUB,
+                      background: section === s.key ? "rgba(139,92,246,0.3)" : "transparent",
+                    }}
+                  >
+                    {s.label}
+                  </button>
+                ))}
+              </nav>
+              <div className="flex-1 p-4 space-y-5">
+                {section === "session" && (
+                  <Toggle
+                    checked={settings.extendedHours}
+                    onChange={(v) => onChange({ ...settings, extendedHours: v })}
+                    label="盘前盘后"
+                    hint="分钟线、小时线显示 04:00–09:30 和 16:00–20:00(美东);日线/周线不受影响"
+                  />
+                )}
+                {section === "chart" && (
+                  <>
+                    <div className="text-[10px]" style={{ color: MUTED }}>
+                      默认视野:打开、换周期、点刷新时回到这里。手动拖动、缩放不会改这些设置。
+                    </div>
+                    <Slider
+                      label="K 线宽度"
+                      value={settings.barSpacing}
+                      min={3}
+                      max={30}
+                      unit="px"
+                      onChange={(v) => onChange({ ...settings, barSpacing: v })}
+                    />
+                    <Slider
+                      label="最新 K 线位置"
+                      hint="最后一根 K 线在图宽的位置,右边留白"
+                      value={settings.lastBarAt}
+                      min={50}
+                      max={95}
+                      unit="%"
+                      onChange={(v) => onChange({ ...settings, lastBarAt: v })}
+                    />
+                    <MarkColorPicker colors={settings.markColors} onChange={(markColors) => onChange({ ...settings, markColors })} />
+                    <button
+                      onClick={() =>
+                        onChange({
+                          ...settings,
+                          barSpacing: DEFAULT_SETTINGS.barSpacing,
+                          lastBarAt: DEFAULT_SETTINGS.lastBarAt,
+                          markColors: DEFAULT_SETTINGS.markColors,
+                        })
+                      }
+                      className="text-[11px] px-2.5 py-1 rounded transition-colors hover:bg-violet-500/10"
+                      style={{ color: SUB, border: `1px solid ${BORDER}` }}
+                    >
+                      恢复默认
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
           </div>
-          <Toggle
-            checked={settings.extendedHours}
-            onChange={(v) => onChange({ ...settings, extendedHours: v })}
-            label="盘前盘后"
-            hint="分钟线、小时线显示 04:00–09:30 和 16:00–20:00(美东);日线/周线不受影响"
-          />
         </div>
       )}
-    </div>
+    </>
   );
 }
 
@@ -830,20 +1176,20 @@ interface Legend {
   marks: BarTrades | undefined;
 }
 
-/** 打开时最后一根 K 线放在图宽约 70% 的位置,右边留 30% 空白 */
-const LAST_BAR_AT = 0.7;
-const BAR_SPACING = 8;
+/** 纵向自动缩放以 K 线为准,EMA 最多把上下各撑开 K 线高低差的这么多倍,再远的部分出屏 */
+const EMA_SCALE_SLACK = 0.35;
 
-function placeLastBar(chart: IChartApi, tries = 0) {
+/** 默认视野:K 线宽 barSpacing,最后一根放在图宽 lastBarAt% 处 */
+function placeLastBar(chart: IChartApi, barSpacing: number, lastBarAt: number, tries = 0) {
   const ts = chart.timeScale();
   const width = ts.width();
   // autoSize 要等 ResizeObserver 量完尺寸,宽度还是 0 时下一帧再试
   if (width <= 0) {
-    if (tries < 30) requestAnimationFrame(() => placeLastBar(chart, tries + 1));
+    if (tries < 30) requestAnimationFrame(() => placeLastBar(chart, barSpacing, lastBarAt, tries + 1));
     return;
   }
-  ts.applyOptions({ barSpacing: BAR_SPACING });
-  ts.scrollToPosition((width * (1 - LAST_BAR_AT)) / BAR_SPACING, false);
+  ts.applyOptions({ barSpacing });
+  ts.scrollToPosition((width * (1 - lastBarAt / 100)) / barSpacing, false);
 }
 
 const DRAW_TOOLS: { key: DrawTool; label: string; Icon: typeof Minus }[] = [
@@ -892,29 +1238,38 @@ function CandleChart({
   avgCost,
   viewKey,
   resetNonce,
+  barSpacing,
+  lastBarAt,
+  markColors,
 }: {
   symbol: string;
   period: Period;
   data: CandleData | null;
   marks: BarTrades[];
   avgCost: number | null;
-  /** 换周期/盘前盘后时变,视野重置到默认;换股票不重置,沿用当前的缩放和滚动位置 */
+  /** 换周期/盘前盘后/默认视野设置时变,视野重置到默认;换股票不重置,沿用当前的缩放和滚动位置 */
   viewKey: string;
   /** 刷新键 +1,视野重置到默认 */
   resetNonce: number;
+  /** 默认视野(设置里调),viewKey 里也带上它们,改了设置就重置到新的默认视野 */
+  barSpacing: number;
+  lastBarAt: number;
+  markColors: MarkColors;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const volRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   const emaRefs = useRef<Record<number, ISeriesApi<"Line">>>({});
-  const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
+  const marksPrimRef = useRef<TradeMarksPrimitive | null>(null);
   const costLineRef = useRef<IPriceLine | null>(null);
   // 上次定位视野时的 symbol / viewKey / resetNonce;同一组下的轮询刷新不动用户拖过的视野
   const fittedRef = useRef<{ symbol: string; viewKey: string; resetNonce: number } | null>(null);
   // 用户当前的横向视野(缩放 + 最后一根离右边几根 bar),换股票时照搬过去
   const viewRef = useRef<{ barSpacing: number; scrollPos: number } | null>(null);
   const hasDataRef = useRef(false);
+  // EMA 的 autoscaleInfoProvider 在图表回调里读当前 K 线
+  const candlesRef = useRef<Candle[]>([]);
   const [hover, setHover] = useState<Legend | null>(null);
 
   // 画线
@@ -967,6 +1322,25 @@ function CandleChart({
     const [pricePane, volPane] = chart.panes();
     pricePane.setStretchFactor(0.78);
     volPane.setStretchFactor(0.22);
+    // EMA 不能把价格轴拉太开:均线滞后,跳空后 EMA50 会远在 K 线下面,全算进去 K 线就被挤到半屏
+    const emaAutoscale = (base: () => AutoscaleInfo | null): AutoscaleInfo | null => {
+      const info = base();
+      const range = chart.timeScale().getVisibleLogicalRange();
+      const bars = candlesRef.current;
+      if (!info?.priceRange || !range || !bars.length) return info;
+      const from = Math.max(0, Math.floor(range.from));
+      const to = Math.min(bars.length - 1, Math.ceil(range.to));
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (let i = from; i <= to; i++) {
+        lo = Math.min(lo, bars[i].low);
+        hi = Math.max(hi, bars[i].high);
+      }
+      if (lo > hi) return info;
+      const slack = (hi - lo) * EMA_SCALE_SLACK;
+      const { minValue, maxValue } = info.priceRange;
+      return { ...info, priceRange: { minValue: Math.max(minValue, lo - slack), maxValue: Math.min(maxValue, hi + slack) } };
+    };
     for (const n of EMA_LENGTHS) {
       emaRefs.current[n] = chart.addSeries(LineSeries, {
         color: EMA_COLORS[n],
@@ -974,12 +1348,15 @@ function CandleChart({
         priceLineVisible: false,
         lastValueVisible: false,
         crosshairMarkerVisible: false,
+        autoscaleInfoProvider: emaAutoscale,
       });
     }
     chartRef.current = chart;
     candleRef.current = candle;
     volRef.current = vol;
-    markersRef.current = createSeriesMarkers(candle, [], { zOrder: "top" });
+    const marksPrim = new TradeMarksPrimitive();
+    candle.attachPrimitive(marksPrim);
+    marksPrimRef.current = marksPrim;
     const prim = new DrawingsPrimitive();
     candle.attachPrimitive(prim);
     primRef.current = prim;
@@ -996,6 +1373,7 @@ function CandleChart({
   }, []);
 
   const candles = data?.candles ?? [];
+  candlesRef.current = candles;
   const emaSeries = useMemo(() => {
     const out: Record<number, { time: number; value: number }[]> = {};
     for (const n of EMA_LENGTHS) out[n] = ema(candles, n);
@@ -1035,21 +1413,10 @@ function CandleChart({
       }))
     );
     for (const n of EMA_LENGTHS) emaRefs.current[n]?.setData(emaSeries[n].map((p) => ({ time: t(p.time), value: p.value })));
-    markersRef.current?.setMarkers(
+    marksPrimRef.current?.setMarks(
       marks.flatMap((m) => {
         const price = markPrice(m, candles[indexByTime.get(m.time) ?? -1]);
-        if (price === null) return [];
-        return [
-          {
-            time: t(m.time),
-            position: "atPriceMiddle" as const,
-            price,
-            shape: "circle" as const,
-            color: MARK_COLORS[m.kind],
-            text: MARK_TEXT[m.kind],
-            size: 1,
-          },
-        ];
+        return price === null ? [] : [{ time: m.time, price, color: markColors[m.kind], text: MARK_TEXT[m.kind] }];
       })
     );
     const fitted = fittedRef.current;
@@ -1064,11 +1431,11 @@ function CandleChart({
         ts.applyOptions({ barSpacing: viewRef.current!.barSpacing });
         ts.scrollToPosition(viewRef.current!.scrollPos, false);
       } else {
-        placeLastBar(chart);
+        placeLastBar(chart, barSpacing, lastBarAt);
       }
     }
     hasDataRef.current = candles.length > 0;
-  }, [candles, emaSeries, marks, symbol, viewKey, resetNonce, indexByTime]);
+  }, [candles, emaSeries, marks, symbol, viewKey, resetNonce, indexByTime, barSpacing, lastBarAt, markColors]);
 
   // 持仓均价线
   useEffect(() => {
@@ -1281,7 +1648,7 @@ function CandleChart({
           {legend.marks && (
             <div className="flex flex-col gap-0.5">
               {legend.marks.trades.map((t) => (
-                <span key={t.id} style={{ color: t.side === "buy" ? MARK_COLORS.B : MARK_COLORS.S }}>
+                <span key={t.id} style={{ color: t.side === "buy" ? markColors.B : markColors.S }}>
                   {t.side === "buy" ? "买" : "卖"} {t.qty} @ {t.price}
                   <span style={{ color: SUB }}>
                     {" "}
@@ -1493,6 +1860,26 @@ export default function ChartPage() {
     }
   };
 
+  // 关掉盘前盘后时前端直接过滤(stock-candles 分钟线总是带盘前盘后返回),EMA 也只用常规时段的 bar 算
+  const shown = useMemo<CandleData | null>(
+    () => (data && !settings.extendedHours ? { ...data, candles: regularSessionOnly(data.candles, period) } : data),
+    [data, settings.extendedHours, period]
+  );
+
+  // 当前打开的股票:现价统一用图上最后一根 K 线的收盘价(K 线 15 秒刷新,报价 30 秒),
+  // 这样标签页标题、左侧列表、图上右边的价格标签永远是同一个数;昨收仍用报价的
+  // 报价还没到/拉失败时,昨收和开盘也从 K 线推
+  const liveQuotes = useMemo<QuotesResponse | null>(() => {
+    const lastBar = shown && shown.symbol === symbol ? shown.candles[shown.candles.length - 1] : undefined;
+    if (!lastBar) return quotes;
+    const q = quotes?.usd[symbol];
+    const live = q
+      ? { ...q, c: lastBar.close }
+      : { c: lastBar.close, o: lastBar.open, pc: data ? previousDayClose(data.candles, period) : null };
+    const base: QuotesResponse = quotes ?? { fx: null, usd: {}, cad: {} };
+    return { ...base, usd: { ...base.usd, [symbol]: live } };
+  }, [quotes, shown, symbol, data, period]);
+
   const rows = useMemo<ListRow[]>(() => {
     if (activeList) return activeList.symbols.map((ticker) => ({ ticker }));
     // 手动排过的按存的顺序,新出现的持仓按代码排在后面(holdings 本身已按代码排好)
@@ -1500,7 +1887,7 @@ export default function ChartPage() {
     const key = (t: string, i: number) => rank.get(t) ?? holdingsOrder.length + i;
     const ordered = holdings.map((h, i) => ({ h, k: key(h.ticker, i) })).sort((a, b) => a.k - b.k).map((x) => x.h);
     return ordered.map((h) => {
-      const q = quotes?.usd[h.ticker] ?? null;
+      const q = liveQuotes?.usd[h.ticker] ?? null;
       const pnlPct = q && h.avgCost > 0 ? ((q.c - h.avgCost) / h.avgCost) * 100 : null;
       return {
         ticker: h.ticker,
@@ -1511,7 +1898,7 @@ export default function ChartPage() {
         ),
       };
     });
-  }, [activeList, holdings, holdingsOrder, quotes]);
+  }, [activeList, holdings, holdingsOrder, liveQuotes]);
 
   // 左侧报价:30 秒一次,页面在后台时不拉。当前打开的股票也一起拉(不在列表里时标题要用)
   const tickerKey = [...new Set([...rows.map((r) => r.ticker), symbol].filter(Boolean))].join(",");
@@ -1583,23 +1970,19 @@ export default function ChartPage() {
     () => trades.filter((t) => t.ticker.toUpperCase() === symbol && isUsStock(t)),
     [trades, symbol]
   );
-  // 关掉盘前盘后时前端直接过滤(stock-candles 分钟线总是带盘前盘后返回),EMA 也只用常规时段的 bar 算
-  const shown = useMemo<CandleData | null>(
-    () => (data && !settings.extendedHours ? { ...data, candles: regularSessionOnly(data.candles, period) } : data),
-    [data, settings.extendedHours, period]
-  );
   const marks = useMemo(
     () => (shown ? groupTradesByBar(shown.candles, symbolTrades, period) : []),
     [shown, symbolTrades, period]
   );
 
-  const last = data?.candles[data.candles.length - 1];
-  const quote = quotes?.usd[symbol] ?? null;
-  const price = quote?.c ?? last?.close ?? null;
-  const prevClose = quote?.pc ?? (isDaily(period) && data && data.candles.length > 1 ? data.candles[data.candles.length - 2].close : data?.previousClose ?? null);
+  const quote = liveQuotes?.usd[symbol] ?? null;
+  const price = quote?.c ?? shown?.candles[shown.candles.length - 1]?.close ?? null;
+  const prevClose = quote?.pc ?? (data ? previousDayClose(data.candles, period) : null);
   const dayChg = price !== null && prevClose ? ((price - prevClose) / prevClose) * 100 : null;
 
-  // 浏览器标签页标题:代码 现价 涨跌幅,离开页面时还原
+  const holdPct = holding && price !== null && holding.avgCost > 0 ? ((price - holding.avgCost) / holding.avgCost) * 100 : null;
+
+  // 浏览器标签页标题:代码 现价 涨跌幅(持有的话再加 持仓盈亏%),离开页面时还原
   useEffect(() => {
     const prev = document.title;
     return () => {
@@ -1608,8 +1991,9 @@ export default function ChartPage() {
   }, []);
   useEffect(() => {
     if (!symbol) return;
-    document.title = price === null ? symbol : `${symbol} ${fmtPrice(price)} ${fmtPct(dayChg)}`;
-  }, [symbol, price, dayChg]);
+    document.title =
+      price === null ? symbol : `${symbol} ${fmtPrice(price)} ${fmtPct(dayChg)}${holdPct === null ? "" : ` 持${fmtPct(holdPct)}`}`;
+  }, [symbol, price, dayChg, holdPct]);
 
   return (
     <div className="min-h-screen lg:h-screen flex flex-col" style={{ background: BG, fontFamily: "'Inter', sans-serif" }}>
@@ -1621,7 +2005,7 @@ export default function ChartPage() {
           lists={lists}
           listsError={listsError}
           rows={rows}
-          quotes={quotes}
+          quotes={liveQuotes}
           sparks={sparks}
           active={symbol}
           onPick={(t) => navigate(`/dashboard/chart/${t}`)}
@@ -1706,7 +2090,7 @@ export default function ChartPage() {
               >
                 <RefreshCw size={14} className={loading ? "animate-spin" : undefined} aria-hidden />
               </button>
-              <SettingsMenu settings={settings} onChange={setSettings} />
+              <SettingsDialog settings={settings} onChange={setSettings} />
             </div>
           </header>
 
@@ -1720,11 +2104,11 @@ export default function ChartPage() {
               左边选一只股票,或输入代码
             </div>
           )}
-          <CandleChart symbol={symbol} period={period} data={shown} marks={marks} avgCost={holding?.avgCost ?? null} viewKey={`${period}|${settings.extendedHours}`} resetNonce={resetNonce} />
+          <CandleChart symbol={symbol} period={period} data={shown} marks={marks} avgCost={holding?.avgCost ?? null} viewKey={`${period}|${settings.extendedHours}|${settings.barSpacing}|${settings.lastBarAt}`} resetNonce={resetNonce} barSpacing={settings.barSpacing} lastBarAt={settings.lastBarAt} markColors={settings.markColors} />
           <div className="flex flex-wrap gap-x-4 px-4 py-2 text-[10px]" style={{ ...mono, color: MUTED, borderTop: `1px solid ${BORDER}` }}>
-            <span><b style={{ color: MARK_COLORS.B }}>B</b> 买入</span>
-            <span><b style={{ color: MARK_COLORS.S }}>S</b> 卖出</span>
-            <span><b style={{ color: MARK_COLORS.T }}>T</b> 同一根K线多笔成交</span>
+            <span><b style={{ color: settings.markColors.B }}>B</b> 买入</span>
+            <span><b style={{ color: settings.markColors.S }}>S</b> 卖出</span>
+            <span><b style={{ color: settings.markColors.T }}>T</b> 同一根K线多笔成交</span>
             <span>点的位置 = 成交价</span>
             <span>{isDaily(period) ? "按交易日(美东)" : settings.extendedHours ? "时间为美东,含盘前盘后" : "时间为美东,仅常规时段"}</span>
             <span className="ml-auto">{symbolTrades.length} 笔交易 · 图上 {marks.length} 个点</span>

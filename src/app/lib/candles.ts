@@ -197,3 +197,18 @@ export function groupTradesByBar(candles: Candle[], trades: StockTrade[], period
       return { time, kind, trades: list };
     });
 }
+
+/**
+ * 从 K 线推"昨收":日线/周线取倒数第二根收盘;分钟线/小时线取最后一根 bar 之前那个交易日常规时段最后一根的收盘。
+ * (stock-candles 的 previousClose 是整个 range 开始前的收盘,分钟线拉 5 天时不是昨收)
+ */
+export function previousDayClose(candles: Candle[], period: Period): number | null {
+  if (candles.length < 2) return null;
+  if (isDaily(period)) return candles[candles.length - 2].close;
+  const regular = regularSessionOnly(candles, period);
+  const lastDay = Math.floor(candles[candles.length - 1].time / 86400);
+  for (let i = regular.length - 1; i >= 0; i--) {
+    if (Math.floor(regular[i].time / 86400) < lastDay) return regular[i].close;
+  }
+  return null;
+}
