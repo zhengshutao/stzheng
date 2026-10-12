@@ -3,11 +3,39 @@ import { Link, useNavigate } from "react-router";
 import { LogOut } from "lucide-react";
 import { supabase } from "@/app/lib/supabase";
 import { useAuth } from "@/app/lib/AuthContext";
+import { useCurrency } from "@/app/lib/CurrencyContext";
+import type { Currency } from "@/app/lib/dashboardData";
 
 const mono = { fontFamily: "'JetBrains Mono', monospace" };
 const display = { fontFamily: "'Exo 2', sans-serif" };
 
-export default function DashboardNavbar({ sub }: { sub?: string }) {
+const CCYS: Currency[] = ["USD", "CAD"];
+
+function CurrencyToggle() {
+  const { currency, setCurrency } = useCurrency();
+  return (
+    <div
+      className="flex items-center rounded-full p-0.5 text-[10px] font-semibold"
+      style={{ ...mono, background: "rgba(139,92,246,0.08)", border: "1px solid rgba(139,92,246,0.2)" }}
+    >
+      {CCYS.map((c) => (
+        <button
+          key={c}
+          onClick={() => setCurrency(c)}
+          className="px-2.5 py-1 rounded-full transition-all"
+          style={{
+            color: currency === c ? "#fff" : "#6b7fa8",
+            background: currency === c ? "linear-gradient(135deg,#8b5cf6,#7c3aed)" : "transparent",
+          }}
+        >
+          {c}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export default function DashboardNavbar({ sub, showCurrency = true }: { sub?: string; showCurrency?: boolean }) {
   const { session } = useAuth();
   const navigate = useNavigate();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -47,9 +75,25 @@ export default function DashboardNavbar({ sub }: { sub?: string }) {
         <span className="text-[10px] tracking-widest hidden sm:block" style={{ ...mono, color: "#4a5568" }}>
           {sub ?? "SYS/ASSETS"}
         </span>
+        <Link
+          to="/dashboard/portfolio"
+          className="text-[10px] tracking-widest transition-colors hover:text-violet-300"
+          style={{ ...mono, color: "#a78bfa" }}
+        >
+          投资组合
+        </Link>
+        <Link
+          to="/dashboard/chart"
+          className="text-[10px] tracking-widest transition-colors hover:text-violet-300"
+          style={{ ...mono, color: "#a78bfa" }}
+        >
+          K线
+        </Link>
       </div>
 
-      <div className="relative" ref={menuRef}>
+      <div className="flex items-center gap-3">
+        {showCurrency && <CurrencyToggle />}
+        <div className="relative" ref={menuRef}>
         <button
           onClick={() => setMenuOpen((v) => !v)}
           className="w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold transition-all"
@@ -90,6 +134,7 @@ export default function DashboardNavbar({ sub }: { sub?: string }) {
             </button>
           </div>
         )}
+        </div>
       </div>
     </nav>
   );

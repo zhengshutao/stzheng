@@ -34,6 +34,11 @@ export async function listBankItems(): Promise<BankItem[]> {
   return data.items;
 }
 
+export async function syncBankItems(terms: string[]): Promise<number> {
+  const data = await invokePlaidLink<{ count: number }>({ action: "sync", terms });
+  return data.count;
+}
+
 export async function removeBankItem(itemId: string): Promise<void> {
   await invokePlaidLink({ action: "remove", item_id: itemId });
 }

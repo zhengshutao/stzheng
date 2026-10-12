@@ -68,7 +68,7 @@ const RANGES: { key: RangeKey; label: string }[] = [
 ];
 
 function iso(d: Date): string {
-  return d.toISOString().slice(0, 10);
+  return new Intl.DateTimeFormat("en-CA").format(d);
 }
 
 function rangeDates(key: RangeKey): { from: string | null; to: string | null } {
@@ -263,7 +263,19 @@ export default function DailyRecordsPage() {
             .catch((e) => setBankError(String((e as Error).message ?? e)))
             .finally(() => setLinking(false));
         },
-        () => setLinking(false)
+        (plaidError, metadata) => {
+          setLinking(false);
+          if (!plaidError) return;
+          const parts = [
+            plaidError.error_code,
+            plaidError.error_message,
+            plaidError.display_message,
+            metadata.status ? `status=${metadata.status}` : null,
+            metadata.link_session_id ? `link_session_id=${metadata.link_session_id}` : null,
+            metadata.request_id ? `request_id=${metadata.request_id}` : null,
+          ].filter(Boolean);
+          setBankError(`Plaid 连接失败: ${parts.join(" · ")}`);
+        }
       );
     } catch (e) {
       setBankError(String((e as Error).message ?? e));

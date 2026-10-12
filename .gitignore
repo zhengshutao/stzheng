@@ -5,3 +5,7 @@ dist/
 .env
 .env.*
 !.env.example
+.local/
+data/wealthsimple/
+supabase/.temp/
+.claude/settings.local.json

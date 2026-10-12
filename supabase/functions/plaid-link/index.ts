@@ -121,6 +121,37 @@ Deno.serve(async (req: Request) => {
       return jsonResponse({ items: data });
     }
 
+    if (body.action === "sync") {
+      const terms = ((body.terms ?? []) as string[]).map((term) => term.toLowerCase());
+      let q = supabaseAdmin
+        .from("bank_items")
+        .select("item_id, institution_name")
+        .eq("user_id", user.id)
+        .neq("access_token", "");
+      const { data: items, error } = await q;
+      if (error) return jsonResponse({ error: error.message }, 500);
+
+      const matched = (items ?? []).filter((item) => {
+        if (terms.length === 0) return true;
+        const name = String(item.institution_name ?? "").toLowerCase();
+        return terms.some((term) => name.includes(term));
+      });
+
+      for (const item of matched) {
+        const syncPromise = fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/bank-sync`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-cron-secret": Deno.env.get("CRON_SECRET") ?? "" },
+          body: JSON.stringify({ item_id: item.item_id, immediate: true }),
+        }).catch(() => {});
+        // @ts-ignore EdgeRuntime 由 Supabase 平台注入,用于后台任务
+        (globalThis as { EdgeRuntime?: { waitUntil: (p: Promise<unknown>) => void } }).EdgeRuntime?.waitUntil(
+          syncPromise
+        );
+      }
+
+      return jsonResponse({ ok: true, count: matched.length });
+    }
+
     if (body.action === "remove") {
       const { item_id } = body as { item_id: string };
       const { data: item } = await supabaseAdmin

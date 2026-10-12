@@ -1,8 +1,13 @@
 // FIFO 持仓/盈亏计算 —— 移植自 /Users/szheng/stock/trades.py 的 _replay 算法。
 // 输入始终是完整的交易列表(按 ticker+currency+account 分组做 FIFO 撮合),
 // 持仓的 avg_cost 是"当前剩余未平仓 lot"的加权平均成本,不是全部历史买入的均价。
+//
+// 每日盈亏不在这里算(见 dailyPnl.ts,那边不需要 FIFO)。这里只管:持仓明细、已实现盈亏、现金余额。
 
-import type { StockCash, StockTrade } from "@/app/lib/dashboardData";
+import type { StockCash, StockSplit, StockTrade } from "@/app/lib/dashboardData";
+import { contractMultiplier } from "@/app/lib/instruments";
+
+export { contractMultiplier };
 
 export interface Lot {
   qty: number;
@@ -29,17 +34,12 @@ function tradeTs(t: StockTrade): string {
   return t.ts ?? t.date;
 }
 
-function posKey(ticker: string, currency: string, account: string): string {
-  return `${ticker}|${currency}|${account}`;
+function splitTs(s: StockSplit): string {
+  return s.ts ?? s.date;
 }
 
-// 期权按"张"(contract)交易,一张对应 100 股标的——买卖价、现价都是"每股"权利金,
-// 换算成实际金额(市值/盈亏/占用现金)要乘以 100。ticker 是手输的自由文本才会是期权,
-// 形如 "TSLA Jul 27 $410 Call"(标的 + 到期月日 + 行权价 + 方向)。
-const OPTION_TICKER_RE = /^[A-Za-z.]{1,6}\s+[A-Za-z]{3}[a-z]*\s+\d{1,2}\s+\$\d+(?:\.\d+)?\s+(Call|Put)$/i;
-
-export function contractMultiplier(ticker: string): number {
-  return OPTION_TICKER_RE.test(ticker.trim()) ? 100 : 1;
+function posKey(ticker: string, currency: string, account: string): string {
+  return `${ticker}|${currency}|${account}`;
 }
 
 /** FIFO 消耗 lots(原地修改,清空已耗尽的 lot),返回卖出结算结果。 */
@@ -74,16 +74,46 @@ function consumeLotsFifo(
   };
 }
 
-/** 按 ticker+currency+account 做 FIFO 撮合,返回持仓(仅剩余未平仓 lot)和逐笔盈亏明细。 */
-export function replay(trades: StockTrade[]): {
+type ReplayEvent =
+  | { kind: "trade"; ts: string; trade: StockTrade }
+  | { kind: "split"; ts: string; split: StockSplit };
+
+/**
+ * 按 ticker+currency+account 做 FIFO 撮合,返回持仓(仅剩余未平仓 lot)和逐笔盈亏明细。
+ * splits 是拆股/合股/并购换股这类没有成交价的公司行为——按 ts 混入同一条时间线,
+ * 撞到时把当时该 key 名下所有未平仓 lot 的 qty*ratio、price/ratio(总成本不变)。
+ */
+export function replay(
+  trades: StockTrade[],
+  splits: StockSplit[] = []
+): {
   positions: Position[];
   enrichedTrades: EnrichedTrade[];
 } {
-  const sorted = [...trades].sort((a, b) => tradeTs(a).localeCompare(tradeTs(b)));
+  const events: ReplayEvent[] = [
+    ...trades.map((t) => ({ kind: "trade" as const, ts: tradeTs(t), trade: t })),
+    ...splits.map((s) => ({ kind: "split" as const, ts: splitTs(s), split: s })),
+  ];
+  events.sort((a, b) => a.ts.localeCompare(b.ts));
   const lotsByKey = new Map<string, Lot[]>();
   const enrichedTrades: EnrichedTrade[] = [];
 
-  for (const t of sorted) {
+  for (const e of events) {
+    if (e.kind === "split") {
+      const s = e.split;
+      const key = posKey(s.ticker.toUpperCase(), s.currency.toUpperCase(), (s.account ?? "TFSA").toUpperCase());
+      const lots = lotsByKey.get(key);
+      if (lots) {
+        for (const lot of lots) {
+          lot.qty *= s.ratio;
+          lot.price /= s.ratio;
+          if (lot.initial_stop !== undefined) lot.initial_stop /= s.ratio;
+        }
+      }
+      continue;
+    }
+
+    const t = e.trade;
     const ticker = t.ticker.toUpperCase();
     const currency = t.currency.toUpperCase();
     const account = (t.account ?? "TFSA").toUpperCase();
@@ -135,8 +165,8 @@ export function replay(trades: StockTrade[]): {
   return { positions, enrichedTrades };
 }
 
-export function computePositions(trades: StockTrade[]): Position[] {
-  return replay(trades).positions;
+export function computePositions(trades: StockTrade[], splits: StockSplit[] = []): Position[] {
+  return replay(trades, splits).positions;
 }
 
 /** {账户: {币种: 余额}} —— 入金加、出金减、买入减 qty*price+fees、卖出加 qty*price-fees。 */
@@ -172,8 +202,8 @@ export interface StockSummary {
 }
 
 /** 用重新做过 FIFO 撮合后的已实现盈亏统计(不依赖数据库里可能过期的 realized_pnl 字段)。 */
-export function computeStockSummary(trades: StockTrade[]): StockSummary {
-  const { enrichedTrades } = replay(trades);
+export function computeStockSummary(trades: StockTrade[], splits: StockSplit[] = []): StockSummary {
+  const { enrichedTrades } = replay(trades, splits);
   const sells = enrichedTrades.filter((t) => t.side === "sell" && t.realized_pnl !== null);
   const realizedByCcy: Record<string, number> = {};
   let winCount = 0;
@@ -225,39 +255,4 @@ export interface Quote {
   c: number;
   o: number;
   pc: number | null;
-}
-
-/**
- * 今日盈亏——只反映当前实际持有的这批 lot,不管当天有没有做过已经平仓的日内交易:
- *   lot 是当天(交易日)买入的: (live-lot.price) * lot.qty
- *   lot 是隔夜持有的: (live-pc) * lot.qty
- * 百分比基准 = 各 lot 的名义成本(当天用买入价,隔夜用前收盘价)之和
- */
-export function computeDayPnl(
-  position: Position,
-  live: number | null,
-  pc: number | null,
-  todayStr: string
-): { dayPnl: number | null; dayPct: number | null } {
-  if (live === null) return { dayPnl: null, dayPct: null };
-
-  const multiplier = contractMultiplier(position.ticker);
-  let dayPnl = 0;
-  let baseline = 0;
-  for (const lot of position.lots) {
-    const isToday = lot.ts.slice(0, 10) === todayStr;
-    if (isToday) {
-      dayPnl += (live - lot.price) * lot.qty * multiplier;
-      baseline += lot.price * lot.qty * multiplier;
-    } else {
-      if (pc === null) return { dayPnl: null, dayPct: null };
-      dayPnl += (live - pc) * lot.qty * multiplier;
-      baseline += pc * lot.qty * multiplier;
-    }
-  }
-  const dayPct = baseline > 0 ? (dayPnl / baseline) * 100 : null;
-  return {
-    dayPnl: Math.round(dayPnl * 100) / 100,
-    dayPct: dayPct !== null ? Math.round(dayPct * 100) / 100 : null,
-  };
 }

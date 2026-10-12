@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Link } from "react-router";
-import { ArrowLeft, RefreshCw } from "lucide-react";
+import { ArrowLeft, ChevronDown, RefreshCw } from "lucide-react";
 import DashboardNavbar from "./DashboardNavbar";
 import { useAuth } from "@/app/lib/AuthContext";
-import { marketSessionDate, isPreMarketLabelWindow } from "@/app/lib/marketTime";
+import { etToday, sessionDateOf } from "@/app/lib/marketTime";
+import { isFreeTextOption, isOccOption } from "@/app/lib/instruments";
+import { diffDailyPnl, priceKey, type DayPnl } from "@/app/lib/dailyPnl";
 import {
   Dialog,
   DialogContent,
@@ -12,14 +14,16 @@ import {
   DialogTitle,
 } from "@/app/components/ui/dialog";
 import {
+  buildDailyPnl,
   fetchDashboardData,
   fmtCad,
   type DashboardData,
+  type LiveMarks,
+  type StockSplit,
   type StockTrade,
 } from "@/app/lib/dashboardData";
 import {
   computeCashBalance,
-  computeDayPnl,
   computePositions,
   computeStockSummary,
   contractMultiplier,
@@ -29,10 +33,12 @@ import {
 } from "@/app/lib/stockPositions";
 import {
   deleteStockCash,
+  deleteStockSplit,
   deleteStockTrade,
   fetchQuotes,
   fetchStops,
   insertStockCash,
+  insertStockSplit,
   insertStockTrade,
   updateStockTrade,
   type Account,
@@ -69,6 +75,49 @@ function StatCard(props: { label: string; value: string; color?: string; sub?: s
       {props.sub && (
         <div className="text-[10px] mt-1 whitespace-pre-line" style={{ ...mono, color: SUB }}>
           {props.sub}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ExpandableStatCard(props: {
+  label: string;
+  value: string;
+  color?: string;
+  sub?: string;
+  open: boolean;
+  onToggle: () => void;
+  rows: { label: string; value: ReactNode; color?: string }[];
+}) {
+  const { label, value, color, sub, open, onToggle, rows } = props;
+  return (
+    <div className="rounded-xl px-5 py-4 flex-1 min-w-[170px]" style={box}>
+      <button type="button" onClick={onToggle} className="w-full flex items-center justify-between">
+        <div className="text-[10px] tracking-widest" style={{ ...mono, color: MUTED }}>
+          {label}
+        </div>
+        <ChevronDown
+          size={14}
+          style={{ color: SUB, transition: "transform 0.15s", transform: open ? "rotate(180deg)" : "rotate(0deg)" }}
+        />
+      </button>
+      <div className="text-xl font-bold" style={{ ...display, color: color ?? TEXT }}>
+        {value}
+      </div>
+      {sub && (
+        <div className="text-[10px] mt-1 whitespace-pre-line" style={{ ...mono, color: SUB }}>
+          {sub}
+        </div>
+      )}
+      {open && (
+        <div className="mt-3 pt-3 space-y-1.5" style={{ borderTop: "1px solid rgba(139,92,246,0.15)" }}>
+          {rows.map((r) => (
+            <div key={r.label} className="flex items-center justify-between text-[11px]" style={mono}>
+              <span style={{ color: SUB }}>{r.label}</span>
+              <span style={{ color: r.color ?? TEXT }}>{r.value}</span>
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -118,16 +167,20 @@ function toCad(amount: number, currency: string, fx: number): number {
   return currency === "CAD" ? amount : amount * fx;
 }
 
+/** 美股(非期权)的代码点进 K 线页,其它原样显示 */
+function TickerLink({ ticker, currency }: { ticker: string; currency: string }) {
+  if (currency.toUpperCase() !== "USD" || isFreeTextOption(ticker) || isOccOption(ticker)) return <>{ticker}</>;
+  return (
+    <Link to={`/dashboard/chart/${ticker.toUpperCase()}`} className="hover:text-violet-300 hover:underline" title="看 K 线">
+      {ticker}
+    </Link>
+  );
+}
+
 function livePrice(p: Position, quotes: QuotesResponse | null): number | null {
   if (!quotes) return null;
   const q = p.currency === "CAD" ? quotes.cad[p.ticker] : quotes.usd[p.ticker];
   return q?.c ?? null;
-}
-
-function prevClose(p: Position, quotes: QuotesResponse | null): number | null {
-  if (!quotes) return null;
-  const q = p.currency === "CAD" ? quotes.cad[p.ticker] : quotes.usd[p.ticker];
-  return q?.pc ?? null;
 }
 
 function stopColor(pct: number | null): string {
@@ -214,9 +267,22 @@ function emptyCashForm(): CashForm {
   return { amount: "", currency: "USD", account: "TFSA", ts: nowLocalInputValue(), note: "" };
 }
 
-export default function StockRecordsPage() {
+interface SplitForm {
+  ticker: string;
+  ratio: string;
+  currency: Currency;
+  account: Account;
+  ts: string;
+  note: string;
+}
+
+function emptySplitForm(): SplitForm {
+  return { ticker: "", ratio: "", currency: "USD", account: "TFSA", ts: nowLocalInputValue(), note: "" };
+}
+
+export default function StockRecordsPage({ initialData }: { initialData?: DashboardData } = {}) {
   const { session } = useAuth();
-  const [data, setData] = useState<DashboardData | null>(null);
+  const [data, setData] = useState<DashboardData | null>(initialData ?? null);
   const [error, setError] = useState<string | null>(null);
   const [account, setAccount] = useState<string>("all");
   const [ticker, setTicker] = useState<string>("all");
@@ -229,6 +295,9 @@ export default function StockRecordsPage() {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [cashDetailOpen, setCashDetailOpen] = useState(false);
+  const [assetsDetailOpen, setAssetsDetailOpen] = useState(false);
+  const [pnlDetailOpen, setPnlDetailOpen] = useState(false);
   const refreshingRef = useRef(false);
 
   const [tradeOpen, setTradeOpen] = useState(false);
@@ -244,23 +313,58 @@ export default function StockRecordsPage() {
   const [cashError, setCashError] = useState("");
   const [cashSaving, setCashSaving] = useState(false);
 
+  const [splitOpen, setSplitOpen] = useState(false);
+  const [splitForm, setSplitForm] = useState<SplitForm>(emptySplitForm());
+  const [splitError, setSplitError] = useState("");
+  const [splitSaving, setSplitSaving] = useState(false);
+
+  // 增删改交易之后,把日历上哪几天的盈亏变了告诉用户(和 WS 同步日志同一套 diff)
+  const [calendarNotice, setCalendarNotice] = useState<string[] | null>(null);
+  const dataRef = useRef<DashboardData | null>(null);
+  dataRef.current = data;
+
   const reloadData = useCallback(async () => {
     try {
       const d = await fetchDashboardData();
       setData(d);
       setError(null);
+      return d;
     } catch (e) {
       setError(String((e as Error).message ?? e));
+      return null;
     }
   }, []);
 
-  useEffect(() => {
-    reloadData();
+  /** 重新拉数据,并把日历变动(按收盘价口径)显示出来 */
+  const reloadAndAnnounce = useCallback(async () => {
+    const prev = dataRef.current;
+    const next = await reloadData();
+    if (!prev || !next) return;
+    const today = etToday();
+    const diff = diffDailyPnl(buildDailyPnl(prev, today), buildDailyPnl(next, today));
+    const fmt = (t: Record<string, number> | null) =>
+      t
+        ? Object.entries(t)
+            .filter(([, v]) => Math.abs(v) >= 0.005)
+            .map(([c, v]) => `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(2)} ${c}`)
+            .join(" / ") || "0"
+        : "—";
+    const lines = [
+      ...diff.added.map((d) => `${d.date} 新增 ${fmt(d.after)}`),
+      ...diff.changed.map((d) => `${d.date} ${fmt(d.before)} → ${fmt(d.after)}`),
+      ...diff.removed.map((d) => `${d.date} 消失(原 ${fmt(d.before)})`),
+    ].sort();
+    setCalendarNotice(lines.length ? lines : ["日历没有变化"]);
   }, [reloadData]);
 
-  const positions = useMemo(() => (data ? computePositions(data.trades) : []), [data]);
+  useEffect(() => {
+    if (initialData) return;
+    reloadData();
+  }, [initialData, reloadData]);
+
+  const positions = useMemo(() => (data ? computePositions(data.trades, data.splits) : []), [data]);
   const cashBalance = useMemo(() => (data ? computeCashBalance(data.cash, data.trades) : {}), [data]);
-  const summary = useMemo(() => (data ? computeStockSummary(data.trades) : null), [data]);
+  const summary = useMemo(() => (data ? computeStockSummary(data.trades, data.splits) : null), [data]);
 
   const usdTickers = useMemo(
     () => [...new Set(positions.filter((p) => p.currency === "USD").map((p) => p.ticker))],
@@ -289,10 +393,17 @@ export default function StockRecordsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [usdTickers.join(","), cadTickers.join(","), positions.length]);
 
+  const refreshDataAndPrices = useCallback(async () => {
+    await reloadData();
+    setCalendarNotice(null);
+    setQuotes(null);
+    setStops({});
+    setLastUpdated(null);
+  }, [reloadData]);
+
   useEffect(() => {
     if (positions.length > 0 && !lastUpdated) refreshPrices();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [positions.length]);
+  }, [positions.length, lastUpdated, refreshPrices]);
 
   useEffect(() => {
     const id = window.setInterval(() => {
@@ -343,8 +454,74 @@ export default function StockRecordsPage() {
 
   const totalPnlCad = floatingPnlCad + realizedPnlCad;
 
-  const todayStr = marketSessionDate();
-  const dayPnlLabel = isPreMarketLabelWindow() ? "昨日盈亏" : "今日盈亏";
+  const accountCashCad = useMemo(() => {
+    const out: Partial<Record<Account, number>> = {};
+    for (const acct of ACCOUNTS) {
+      const bal = cashBalance[acct] ?? {};
+      out[acct] = Object.entries(bal).reduce((sum, [ccy, amt]) => sum + toCad(amt, ccy, fx), 0);
+    }
+    return out;
+  }, [cashBalance, fx]);
+
+  const accountPositionsValueCad = useMemo(() => {
+    const out: Partial<Record<Account, number>> = {};
+    for (const acct of ACCOUNTS) {
+      out[acct] = positions
+        .filter((p) => p.account === acct)
+        .reduce((sum, p) => {
+          const live = livePrice(p, quotes) ?? p.avg_cost;
+          return sum + toCad(p.qty * live * contractMultiplier(p.ticker), p.currency, fx);
+        }, 0);
+    }
+    return out;
+  }, [positions, quotes, fx]);
+
+  const accountFloatingPnlCad = useMemo(() => {
+    const out: Partial<Record<Account, number>> = {};
+    for (const acct of ACCOUNTS) {
+      out[acct] = positions
+        .filter((p) => p.account === acct)
+        .reduce((sum, p) => {
+          const live = livePrice(p, quotes);
+          if (live === null) return sum;
+          return sum + toCad((live - p.avg_cost) * p.qty * contractMultiplier(p.ticker), p.currency, fx);
+        }, 0);
+    }
+    return out;
+  }, [positions, quotes, fx]);
+
+  const accountRealizedPnlCad = useMemo(() => {
+    const out: Partial<Record<Account, number>> = {};
+    if (!data) return out;
+    for (const acct of ACCOUNTS) {
+      const acctSummary = computeStockSummary(
+        data.trades.filter((t) => (t.account ?? "TFSA").toUpperCase() === acct),
+        data.splits.filter((s) => (s.account ?? "TFSA").toUpperCase() === acct)
+      );
+      out[acct] = Object.entries(acctSummary.realizedByCcy).reduce((sum, [ccy, v]) => sum + toCad(v, ccy, fx), 0);
+    }
+    return out;
+  }, [data, fx]);
+
+  const todayStr = etToday();
+  const dayPnlLabel = "今日盈亏";
+
+  // 今天的每日盈亏(和首页日历同一个引擎、同一套数字):实时价只作用于今天
+  const liveMarks = useMemo<LiveMarks | undefined>(() => {
+    if (!quotes) return undefined;
+    const map: LiveMarks = new Map();
+    for (const [ticker, q] of Object.entries(quotes.usd)) if (q && q.c > 0) map.set(priceKey(ticker, "USD"), q.c);
+    for (const [ticker, q] of Object.entries(quotes.cad)) if (q && q.c > 0) map.set(priceKey(ticker, "CAD"), q.c);
+    return map;
+  }, [quotes]);
+  const todayPnl = useMemo<DayPnl | undefined>(
+    () => (data ? buildDailyPnl(data, todayStr, liveMarks).get(todayStr) : undefined),
+    [data, todayStr, liveMarks]
+  );
+  const todayPnlCad = useMemo(
+    () => (todayPnl ? Object.entries(todayPnl.totalByCcy).reduce((sum, [c, v]) => sum + toCad(v, c, fx), 0) : 0),
+    [todayPnl, fx]
+  );
 
   const tickers = useMemo(
     () => (data ? [...new Set(data.trades.map((t) => t.ticker))].sort() : []),
@@ -454,6 +631,7 @@ export default function StockRecordsPage() {
           currency: tradeForm.currency,
           account: tradeForm.account,
           ts: new Date(tradeForm.ts).toISOString(),
+          date: sessionDateOf(new Date(tradeForm.ts)),
           note: tradeForm.note,
           initial_stop: tradeSide === "buy" && tradeForm.initialStop ? Number(tradeForm.initialStop) : null,
           realized_pnl: tradeSide === "sell" ? editingTrade.realized_pnl : null,
@@ -478,6 +656,7 @@ export default function StockRecordsPage() {
             currency: tradeForm.currency,
             account: tradeForm.account,
             ts: new Date(tradeForm.ts).toISOString(),
+            date: sessionDateOf(new Date(tradeForm.ts)),
             note: tradeForm.note,
             initial_stop: tradeSide === "buy" && tradeForm.initialStop ? Number(tradeForm.initialStop) : null,
             realized_pnl: realizedPnl,
@@ -488,7 +667,7 @@ export default function StockRecordsPage() {
       }
       setTradeOpen(false);
       setEditingTrade(null);
-      await reloadData();
+      await reloadAndAnnounce();
       refreshPrices();
     } catch (err) {
       setTradeError(String((err as Error).message ?? err));
@@ -501,7 +680,7 @@ export default function StockRecordsPage() {
     if (!window.confirm("确定删除这笔交易记录?")) return;
     try {
       await deleteStockTrade(id);
-      await reloadData();
+      await reloadAndAnnounce();
     } catch (e) {
       window.alert(`删除失败: ${String((e as Error).message ?? e)}`);
     }
@@ -557,6 +736,55 @@ export default function StockRecordsPage() {
     }
   }
 
+  // ---------- 拆股/合股 ----------
+
+  function openSplit() {
+    setSplitForm(emptySplitForm());
+    setSplitError("");
+    setSplitOpen(true);
+  }
+
+  async function submitSplit(e: FormEvent) {
+    e.preventDefault();
+    if (!session) return;
+    const ratio = Number(splitForm.ratio);
+    if (!splitForm.ticker.trim() || !(ratio > 0) || ratio === 1) {
+      setSplitError("请填写股票代码,比例需大于 0 且不等于 1(比如 2 股合 1 股填 0.5,1 拆 2 填 2)");
+      return;
+    }
+    setSplitSaving(true);
+    setSplitError("");
+    try {
+      await insertStockSplit(
+        {
+          ticker: splitForm.ticker,
+          currency: splitForm.currency,
+          account: splitForm.account,
+          ratio,
+          ts: new Date(splitForm.ts).toISOString(),
+          note: splitForm.note,
+        },
+        session.user.id
+      );
+      setSplitOpen(false);
+      await reloadAndAnnounce();
+    } catch (err) {
+      setSplitError(String((err as Error).message ?? err));
+    } finally {
+      setSplitSaving(false);
+    }
+  }
+
+  async function handleDeleteSplit(id: string) {
+    if (!window.confirm("确定删除这条拆股/合股记录?")) return;
+    try {
+      await deleteStockSplit(id);
+      await reloadAndAnnounce();
+    } catch (e) {
+      window.alert(`删除失败: ${String((e as Error).message ?? e)}`);
+    }
+  }
+
   const dialogContentStyle = {
     background: "#0a0e1c",
     border: "1px solid rgba(139,92,246,0.3)",
@@ -565,7 +793,7 @@ export default function StockRecordsPage() {
 
   return (
     <div className="min-h-screen" style={{ background: "#060a14", fontFamily: "'Inter', sans-serif" }}>
-      <DashboardNavbar sub="SYS/ASSETS · STOCK" />
+      <DashboardNavbar sub="SYS/ASSETS · STOCK" showCurrency={false} />
       <main className="pt-24 pb-16 px-6 lg:px-10 max-w-6xl mx-auto space-y-6">
         <Link
           to="/dashboard"
@@ -624,20 +852,26 @@ export default function StockRecordsPage() {
                   ⊖ 出账
                 </button>
                 <button
-                  onClick={refreshPrices}
-                  disabled={refreshing || positions.length === 0}
+                  onClick={openSplit}
+                  style={{ ...actionBtn, background: "rgba(139,92,246,0.12)", color: SUB, border: "1px solid rgba(139,92,246,0.25)" }}
+                >
+                  ⇄ 拆股/合股
+                </button>
+                <button
+                  onClick={refreshDataAndPrices}
+                  disabled={refreshing}
                   style={{
                     ...actionBtn,
                     background: "#2563eb",
                     color: "#fff",
-                    opacity: refreshing || positions.length === 0 ? 0.6 : 1,
+                    opacity: refreshing ? 0.6 : 1,
                     display: "flex",
                     alignItems: "center",
                     gap: 6,
                   }}
                 >
                   <RefreshCw size={12} className={refreshing ? "animate-spin" : ""} />
-                  刷新价格
+                  刷新数据/价格
                 </button>
                 <label className="flex items-center gap-1.5 text-[11px]" style={{ ...mono, color: SUB }}>
                   <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} />
@@ -651,26 +885,78 @@ export default function StockRecordsPage() {
               </div>
             </div>
 
+            {calendarNotice && (
+              <div
+                className="rounded-xl px-4 py-3 text-[11px] space-y-0.5"
+                style={{ ...mono, color: TEXT, background: "rgba(139,92,246,0.08)", border: "1px solid rgba(139,92,246,0.25)" }}
+              >
+                <div className="flex items-center justify-between">
+                  <span style={{ color: "#a78bfa" }}>日历变动(按收盘价口径)</span>
+                  <button type="button" onClick={() => setCalendarNotice(null)} style={{ color: MUTED }}>
+                    关闭
+                  </button>
+                </div>
+                {calendarNotice.slice(0, 12).map((l) => (
+                  <div key={l}>{l}</div>
+                ))}
+                {calendarNotice.length > 12 && <div style={{ color: MUTED }}>… 还有 {calendarNotice.length - 12} 条</div>}
+              </div>
+            )}
+
             {/* 统计卡 */}
             <div className="flex flex-wrap gap-3">
-              <StatCard
+              <ExpandableStatCard
                 label="总资产 (CAD)"
                 value={fmtCad(totalAssetsCad)}
                 sub={
                   `股票市值 ${fmtCad(positionsValueCad)} · 现金 ${fmtCad(cashCad)}` +
                   (allLive ? "" : "\n(部分持仓价格未刷新)")
                 }
+                open={assetsDetailOpen}
+                onToggle={() => setAssetsDetailOpen((v) => !v)}
+                rows={ACCOUNTS.map((acct) => ({
+                  label: acct,
+                  value: fmtCad((accountPositionsValueCad[acct] ?? 0) + (accountCashCad[acct] ?? 0)),
+                }))}
               />
-              <StatCard
+              <ExpandableStatCard
                 label="总盈亏 (CAD)"
                 value={fmtCad(totalPnlCad, { sign: true })}
                 color={netColor(totalPnlCad)}
                 sub={`浮动 ${fmtCad(floatingPnlCad, { sign: true })} · 已实现 ${fmtCad(realizedPnlCad, { sign: true })}`}
+                open={pnlDetailOpen}
+                onToggle={() => setPnlDetailOpen((v) => !v)}
+                rows={ACCOUNTS.map((acct) => {
+                  const v = (accountFloatingPnlCad[acct] ?? 0) + (accountRealizedPnlCad[acct] ?? 0);
+                  return { label: acct, value: fmtCad(v, { sign: true }), color: netColor(v) };
+                })}
               />
-              <StatCard
+              <ExpandableStatCard
                 label="现金 (CAD)"
                 value={fmtCad(cashCad)}
                 sub={cashRatio !== null ? `占比 ${cashRatio.toFixed(1)}%` : undefined}
+                open={cashDetailOpen}
+                onToggle={() => setCashDetailOpen((v) => !v)}
+                rows={ACCOUNTS.map((acct) => ({
+                  label: acct,
+                  value: (
+                    <>
+                      {fmtCad(cashBalance[acct]?.CAD ?? 0, { ccy: "CAD" })}
+                      {"  ·  "}
+                      {fmtCad(cashBalance[acct]?.USD ?? 0, { ccy: "USD" })}
+                    </>
+                  ),
+                }))}
+              />
+              <StatCard
+                label={`${dayPnlLabel} (CAD)`}
+                value={fmtCad(todayPnlCad, { sign: true })}
+                color={netColor(todayPnlCad)}
+                sub={
+                  todayPnl
+                    ? `${todayPnl.positions.length} 个仓位` + (todayPnl.provisional ? " · 实时价,收盘后为准" : " · 收盘价")
+                    : "今天没有持仓/成交"
+                }
               />
               <StatCard
                 label="胜率"
@@ -710,15 +996,17 @@ export default function StockRecordsPage() {
                   <tbody>
                     {positions.map((p) => {
                       const live = livePrice(p, quotes);
-                      const pc = prevClose(p, quotes);
-                      const { dayPnl, dayPct } = computeDayPnl(p, live, pc, todayStr);
                       const multiplier = contractMultiplier(p.ticker);
+                      const dayRow = todayPnl?.positions.find((r) => r.key === `${p.ticker}|${p.currency}|${p.account}`);
+                      const dayPnl = dayRow ? dayRow.pnl : null;
+                      const dayBase = dayRow ? Math.abs(dayRow.qtyStart) * (dayRow.prevMark ?? 0) * multiplier + dayRow.buyCost : 0;
+                      const dayPct = dayPnl !== null && dayBase > 0 ? (dayPnl / dayBase) * 100 : null;
                       const posPnl = live !== null ? (live - p.avg_cost) * p.qty * multiplier : null;
                       const posPct = live !== null && p.avg_cost > 0 ? ((live - p.avg_cost) / p.avg_cost) * 100 : null;
                       const value = live !== null ? live * p.qty * multiplier : null;
                       return (
                         <tr key={`${p.ticker}-${p.currency}-${p.account}`} style={{ borderBottom: "1px solid rgba(139,92,246,0.07)" }}>
-                          <td className={td} style={{ ...mono, color: TEXT, fontWeight: 600 }}>{p.ticker}</td>
+                          <td className={td} style={{ ...mono, color: TEXT, fontWeight: 600 }}><TickerLink ticker={p.ticker} currency={p.currency} /></td>
                           <td className={td}>
                             <span
                               className="text-[10px] px-1.5 py-0.5 rounded"
@@ -809,7 +1097,7 @@ export default function StockRecordsPage() {
                         <td className={td} style={{ ...mono, color: t.side === "buy" ? POS : NEG, fontWeight: 600 }}>
                           {t.side === "buy" ? "买" : "卖"}
                         </td>
-                        <td className={td} style={{ ...mono, color: TEXT, fontWeight: 600 }}>{t.ticker}</td>
+                        <td className={td} style={{ ...mono, color: TEXT, fontWeight: 600 }}><TickerLink ticker={t.ticker} currency={t.currency} /></td>
                         <td className={td} style={{ ...mono, color: TEXT }}>{t.qty}</td>
                         <td className={td} style={{ ...mono, color: TEXT }}>{t.price.toLocaleString()}</td>
                         <td className={td} style={{ ...mono, color: TEXT }}>{(t.qty * t.price * contractMultiplier(t.ticker)).toLocaleString()}</td>
@@ -1138,6 +1426,119 @@ export default function StockRecordsPage() {
               </button>
             </DialogFooter>
           </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* 拆股/合股 Dialog */}
+      <Dialog open={splitOpen} onOpenChange={setSplitOpen}>
+        <DialogContent style={dialogContentStyle}>
+          <DialogHeader>
+            <DialogTitle style={{ ...display, color: TEXT }}>拆股 / 合股 / 并购换股</DialogTitle>
+          </DialogHeader>
+          <form onSubmit={submitSplit} className="space-y-3">
+            <div className="text-[10px] leading-relaxed" style={{ ...mono, color: SUB }}>
+              记一下"没有成交价、只改变股数"的公司行为(拆股/合股/并购换股)。这里改的是持仓的
+              股数/成本价换算,总成本不变——之后 FIFO 算盈亏才能正确配对股数,不会因为买卖股数对不上而算错。
+            </div>
+            <div>
+              <label className="text-[10px] tracking-widest block mb-1" style={{ ...mono, color: MUTED }}>股票代码</label>
+              <input
+                style={inputStyle}
+                value={splitForm.ticker}
+                onChange={(e) => setSplitForm((f) => ({ ...f, ticker: e.target.value }))}
+                required
+              />
+            </div>
+            <div>
+              <label className="text-[10px] tracking-widest block mb-1" style={{ ...mono, color: MUTED }}>
+                换股比例(换股后股数 = 换股前股数 × 比例。比如 1 拆 2 填 2,2 合 1 填 0.5,1 股换 2.2 股填 2.2)
+              </label>
+              <input
+                type="number"
+                step="any"
+                style={inputStyle}
+                value={splitForm.ratio}
+                onChange={(e) => setSplitForm((f) => ({ ...f, ratio: e.target.value }))}
+                required
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-[10px] tracking-widest block mb-1" style={{ ...mono, color: MUTED }}>币种</label>
+                <select
+                  value={splitForm.currency}
+                  onChange={(e) => setSplitForm((f) => ({ ...f, currency: e.target.value as Currency }))}
+                  style={inputStyle}
+                >
+                  {CURRENCIES.map((c) => (
+                    <option key={c} value={c}>{c}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="text-[10px] tracking-widest block mb-1" style={{ ...mono, color: MUTED }}>账户</label>
+                <select
+                  value={splitForm.account}
+                  onChange={(e) => setSplitForm((f) => ({ ...f, account: e.target.value as Account }))}
+                  style={inputStyle}
+                >
+                  {ACCOUNTS.map((a) => (
+                    <option key={a} value={a}>{a}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div>
+              <label className="text-[10px] tracking-widest block mb-1" style={{ ...mono, color: MUTED }}>生效日期时间</label>
+              <input
+                type="datetime-local"
+                style={inputStyle}
+                value={splitForm.ts}
+                onChange={(e) => setSplitForm((f) => ({ ...f, ts: e.target.value }))}
+                required
+              />
+            </div>
+            <div>
+              <label className="text-[10px] tracking-widest block mb-1" style={{ ...mono, color: MUTED }}>备注</label>
+              <input
+                style={inputStyle}
+                value={splitForm.note}
+                onChange={(e) => setSplitForm((f) => ({ ...f, note: e.target.value }))}
+              />
+            </div>
+            {splitError && <div className="text-xs" style={{ ...mono, color: NEG }}>{splitError}</div>}
+            <DialogFooter>
+              <button
+                type="submit"
+                disabled={splitSaving}
+                className="w-full py-2.5 rounded text-sm font-bold"
+                style={{ ...mono, background: "#7c3aed", color: "#fff", opacity: splitSaving ? 0.6 : 1 }}
+              >
+                {splitSaving ? "保存中..." : "保存"}
+              </button>
+            </DialogFooter>
+          </form>
+          {data && data.splits.length > 0 && (
+            <div className="pt-3 mt-1 space-y-1.5" style={{ borderTop: "1px solid rgba(139,92,246,0.15)" }}>
+              <div className="text-[10px] tracking-widest" style={{ ...mono, color: MUTED }}>已记录</div>
+              {data.splits
+                .slice()
+                .sort((a, b) => (b.ts ?? b.date).localeCompare(a.ts ?? a.date))
+                .map((s) => (
+                  <div key={s.id} className="flex items-center justify-between text-[11px]" style={{ ...mono, color: SUB }}>
+                    <span>
+                      {s.date} {s.ticker} {s.account}/{s.currency} × {s.ratio}
+                    </span>
+                    <button
+                      onClick={() => handleDeleteSplit(s.id)}
+                      style={{ ...mono, color: NEG, background: "none", border: "none", cursor: "pointer" }}
+                    >
+                      删除
+                    </button>
+                  </div>
+                ))}
+            </div>
+          )}
         </DialogContent>
       </Dialog>
     </div>

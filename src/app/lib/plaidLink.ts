@@ -5,6 +5,16 @@ const PLAID_SCRIPT_SRC = "https://cdn.plaid.com/link/v2/stable/link-initialize.j
 
 interface PlaidLinkMetadata {
   institution: { institution_id: string; name: string } | null;
+  link_session_id?: string;
+  request_id?: string;
+  status?: string;
+}
+
+export interface PlaidLinkError {
+  error_type?: string;
+  error_code?: string;
+  error_message?: string;
+  display_message?: string | null;
 }
 
 interface PlaidLinkHandler {
@@ -15,7 +25,7 @@ interface PlaidGlobal {
   create: (config: {
     token: string;
     onSuccess: (publicToken: string, metadata: PlaidLinkMetadata) => void;
-    onExit?: () => void;
+    onExit?: (error: PlaidLinkError | null, metadata: PlaidLinkMetadata) => void;
   }) => PlaidLinkHandler;
 }
 
@@ -44,7 +54,7 @@ function loadPlaidScript(): Promise<void> {
 export async function openPlaidLink(
   token: string,
   onSuccess: (publicToken: string, institution: { institution_id?: string; name?: string } | null) => void,
-  onExit?: () => void
+  onExit?: (error: PlaidLinkError | null, metadata: PlaidLinkMetadata) => void
 ): Promise<void> {
   await loadPlaidScript();
   if (!window.Plaid) throw new Error("Plaid Link 未加载成功");

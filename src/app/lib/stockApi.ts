@@ -1,12 +1,13 @@
 // 股票记录页的读写/行情调用 —— 新增/删除交易和出入金记录,
 // 以及调用 stock-quotes / stock-stops 两个 Supabase Edge Function。
+// (每日快照已经废弃:每日盈亏由 dailyPnl.ts 从交易 + 收盘价现算,不再需要谁来"补录快照"。)
 
 import { supabase } from "@/app/lib/supabase";
-import type { StockCash, StockTrade } from "@/app/lib/dashboardData";
+import type { Currency, StockCash, StockSplit, StockTrade } from "@/app/lib/dashboardData";
 import { stopAnchorAndFloor, type Position, type Quote } from "@/app/lib/stockPositions";
 
+export type { Currency };
 export type Account = "TFSA" | "NON-REG";
-export type Currency = "USD" | "CAD";
 
 export interface NewTradeInput {
   ticker: string;
@@ -16,6 +17,8 @@ export interface NewTradeInput {
   currency: Currency;
   account: Account;
   ts: string; // ISO datetime
+  /** 归属的交易日(美东,晚 8 点后算次日)。不传就取 ts 的 UTC 日期。 */
+  date?: string;
   note: string;
   fees?: number;
   initial_stop?: number | null; // buy only
@@ -35,7 +38,7 @@ export async function insertStockTrade(input: NewTradeInput, userId: string): Pr
   const row = {
     id: crypto.randomUUID(),
     user_id: userId,
-    date: input.ts.slice(0, 10),
+    date: input.date ?? input.ts.slice(0, 10),
     ts: input.ts,
     ticker: input.ticker.toUpperCase(),
     side: input.side,
@@ -55,7 +58,7 @@ export async function insertStockTrade(input: NewTradeInput, userId: string): Pr
 
 export async function updateStockTrade(id: string, input: NewTradeInput): Promise<StockTrade> {
   const row = {
-    date: input.ts.slice(0, 10),
+    date: input.date ?? input.ts.slice(0, 10),
     ts: input.ts,
     ticker: input.ticker.toUpperCase(),
     side: input.side,
@@ -97,6 +100,37 @@ export async function insertStockCash(input: NewCashInput, userId: string): Prom
 export async function deleteStockCash(id: string): Promise<void> {
   const { error } = await supabase.from("stock_cash").delete().eq("id", id);
   if (error) throw new Error(`stock_cash delete: ${error.message}`);
+}
+
+export interface NewSplitInput {
+  ticker: string;
+  currency: Currency;
+  account: Account;
+  ratio: number; // 换股后股数 = 换股前股数 * ratio
+  ts: string; // ISO datetime
+  note: string;
+}
+
+export async function insertStockSplit(input: NewSplitInput, userId: string): Promise<StockSplit> {
+  const row = {
+    id: crypto.randomUUID(),
+    user_id: userId,
+    date: input.date ?? input.ts.slice(0, 10),
+    ts: input.ts,
+    ticker: input.ticker.toUpperCase(),
+    currency: input.currency,
+    account: input.account,
+    ratio: input.ratio,
+    note: input.note || null,
+  };
+  const { data, error } = await supabase.from("stock_splits").insert(row).select().single();
+  if (error) throw new Error(`stock_splits insert: ${error.message}`);
+  return data as StockSplit;
+}
+
+export async function deleteStockSplit(id: string): Promise<void> {
+  const { error } = await supabase.from("stock_splits").delete().eq("id", id);
+  if (error) throw new Error(`stock_splits delete: ${error.message}`);
 }
 
 export interface QuotesResponse {

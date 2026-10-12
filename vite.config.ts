@@ -32,8 +32,9 @@ export default defineConfig({
   },
 
   server: {
-    // Respect an externally assigned port (e.g. from the dev harness)
-    port: process.env.PORT ? Number(process.env.PORT) : undefined,
+    // Respect an externally assigned port, otherwise keep the local app URL stable.
+    port: process.env.PORT ? Number(process.env.PORT) : 8888,
+    strictPort: true,
   },
 
   // File types to support raw imports. Never add .css, .tsx, or .ts files to this.
