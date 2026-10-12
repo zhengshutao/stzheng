@@ -7,6 +7,8 @@
 | 投资组合页面 | `/dashboard/portfolio` + `supabase/functions/snaptrade-portfolio` | 实时看账户、余额、持仓、分配、最近订单/活动、连接状态。只读,不落库 | Supabase Edge Function secrets |
 | 交易同步(线上定时) | `supabase/functions/snaptrade-sync` + pg_cron(每 10 分钟) | 把 Wealthsimple 的成交/出入金补进 `stock_trades` / `stock_cash`,每次在 `sync_runs` 记"上次检查" | Supabase Edge Function secrets |
 | 交易同步脚本(本地) | `scripts/snaptrade/sync-activities.mjs` | 同一份逻辑的命令行版:预览、排查、手动补全部历史 | 本地 `.env` |
+| 止损(K 线页) | `/dashboard/chart` 持仓行 + `supabase/functions/snaptrade-stop` | 显示/更新卖出止损(默认 EMA10 − 1%)。**会下单**:撤旧止损 → 挂 Stop GTC;触发价记在 `stock_stop_orders`(Wealthsimple 不回报触发价)。表:`supabase/2026-10-12-stop-orders.sql` | Supabase Edge Function secrets |
+| 止损脚本(本地) | `scripts/snaptrade/stop-loss.mjs`(`npm run snaptrade:stop`) | 命令行挂/改止损,默认只预览,`--confirm` 才提交 | 本地 `.env` |
 
 ## 一次性准备
 
@@ -33,6 +35,7 @@
 
    ```bash
    supabase functions deploy snaptrade-portfolio
+   supabase functions deploy snaptrade-stop
    ```
 
    保持默认的 JWT 校验(不要加 `--no-verify-jwt`)。

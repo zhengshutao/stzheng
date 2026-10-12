@@ -11,7 +11,8 @@
     "ws:helper": "node scripts/wealthsimple/helper-server.mjs",
     "ws:import": "node scripts/wealthsimple/import-csv.mjs",
     "prices:sync": "node scripts/prices/sync-prices.mjs",
-    "snaptrade:sync": "node scripts/snaptrade/sync-activities.mjs"
+    "snaptrade:sync": "node scripts/snaptrade/sync-activities.mjs",
+    "snaptrade:stop": "node scripts/snaptrade/stop-loss.mjs"
   },
   "dependencies": {
     "@emotion/react": "11.14.0",

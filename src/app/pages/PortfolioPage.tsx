@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { Link } from "react-router";
 import { AlertTriangle, ArrowLeft, Lock, RefreshCw } from "lucide-react";
 import DashboardNavbar from "@/app/pages/DashboardNavbar";
+import { stockFaviconHref, useFavicon } from "@/app/lib/favicon";
 import {
   accountLabel,
   failedSections,
@@ -630,6 +631,7 @@ function ConnectionsPanel({ view }: { view: PortfolioView }) {
 // ---------- 页面 ----------
 
 export default function PortfolioPage() {
+  useFavicon(stockFaviconHref());
   const [view, setView] = useState<PortfolioView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);

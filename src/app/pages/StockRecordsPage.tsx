@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type
 import { Link } from "react-router";
 import { ArrowLeft, ChevronDown, RefreshCw } from "lucide-react";
 import DashboardNavbar from "./DashboardNavbar";
+import { stockFaviconHref, useFavicon } from "@/app/lib/favicon";
 import { useAuth } from "@/app/lib/AuthContext";
 import { etToday, sessionDateOf } from "@/app/lib/marketTime";
 import { isFreeTextOption, isOccOption } from "@/app/lib/instruments";
@@ -281,6 +282,7 @@ function emptySplitForm(): SplitForm {
 }
 
 export default function StockRecordsPage({ initialData }: { initialData?: DashboardData } = {}) {
+  useFavicon(stockFaviconHref());
   const { session } = useAuth();
   const [data, setData] = useState<DashboardData | null>(initialData ?? null);
   const [error, setError] = useState<string | null>(null);

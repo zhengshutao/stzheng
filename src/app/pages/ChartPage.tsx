@@ -27,7 +27,22 @@ import { fetchAll, type StockSplit, type StockTrade } from "@/app/lib/dashboardD
 import { computePositions } from "@/app/lib/stockPositions";
 import { fetchQuotes, type QuotesResponse } from "@/app/lib/stockApi";
 import { runSnaptradeSync } from "@/app/lib/portfolioApi";
+import {
+  BASIS_LABEL,
+  emaStops,
+  fetchStopOrders,
+  planBatch,
+  setStopLoss,
+  type BatchPlanRow,
+  type EmaStops,
+  type SetStopAccountResult,
+  type SetStopResult,
+  type StopBasis,
+  type StopView,
+  type StopsByTicker,
+} from "@/app/lib/stopOrders";
 import { isFreeTextOption, isOccOption } from "@/app/lib/instruments";
+import { stockFaviconHref, useFavicon } from "@/app/lib/favicon";
 import {
   DrawingsPrimitive,
   loadDrawings,
@@ -638,6 +653,8 @@ interface ListRow {
   ticker: string;
   /** 代码下面那行小字:持仓显示股数和盈亏,自选显示公司名 */
   sub?: ReactNode;
+  /** 整行下面再加一行(持仓的止损);放在行按钮外面,里面可以有自己的按钮 */
+  footer?: ReactNode;
 }
 
 function SidePanel({
@@ -657,6 +674,7 @@ function SidePanel({
   onRefresh,
   refreshing,
   refreshNote,
+  onBatchStops,
 }: {
   tab: string;
   onTab: (tab: string) => void;
@@ -676,6 +694,8 @@ function SidePanel({
   onRefresh: () => void;
   refreshing: boolean;
   refreshNote: string | null;
+  /** 持仓页签:批量更新 EMA 方式的止损;null = 止损还没读到 */
+  onBatchStops: (() => void) | null;
 }) {
   const [input, setInput] = useState("");
   // 拖拽:dragFrom = 拖起的行下标,dropAt = 插入位置(0..n)
@@ -768,9 +788,19 @@ function SidePanel({
           />
         </form>
       </div>
-      {!list && refreshNote && (
-        <div className="px-4 pb-1.5 text-[10px]" style={{ color: SUB }}>
-          {refreshNote}
+      {!list && (
+        <div className="px-4 pb-1.5 flex items-center justify-between gap-2 text-[10px]" style={{ color: SUB }}>
+          <span className="truncate">{refreshNote}</span>
+          <button
+            type="button"
+            onClick={onBatchStops ?? undefined}
+            disabled={!onBatchStops}
+            title={onBatchStops ? "EMA10 / EMA20 方式的止损按今天的 EMA − 1% 重新挂;EMA 比昨天低、或自定义价格的不动" : "止损还没读到"}
+            className="px-1.5 py-0.5 rounded shrink-0 text-[10px] leading-none hover:bg-violet-500/20 disabled:cursor-not-allowed"
+            style={{ ...mono, color: "#c4b5fd", border: `1px solid ${BORDER}`, opacity: onBatchStops ? 1 : 0.4 }}
+          >
+            批量更新止损
+          </button>
         </div>
       )}
 
@@ -822,9 +852,8 @@ function SidePanel({
           const chg = chgOf(r.ticker);
           const selected = r.ticker === active;
           return (
-            <button
+            <div
               key={r.ticker}
-              onClick={() => onPick(r.ticker)}
               draggable
               onDragStart={(e) => {
                 e.dataTransfer.effectAllowed = "move";
@@ -842,7 +871,7 @@ function SidePanel({
                 drop();
               }}
               onDragEnd={endDrag}
-              className="w-full grid grid-cols-[1fr_72px_auto] gap-x-3 items-center px-4 py-2 text-left transition-colors hover:bg-violet-500/5 cursor-grab active:cursor-grabbing"
+              className="transition-colors hover:bg-violet-500/5 cursor-grab active:cursor-grabbing"
               style={{
                 borderBottom: "1px solid rgba(139,92,246,0.07)",
                 background: selected ? "rgba(139,92,246,0.14)" : undefined,
@@ -853,24 +882,30 @@ function SidePanel({
                   dropAt === i ? "inset 0 2px 0 #8b5cf6" : dropAt === i + 1 && i === shown.length - 1 ? "inset 0 -2px 0 #8b5cf6" : undefined,
               }}
             >
-              <span className="min-w-0">
-                <span className="block text-sm font-semibold" style={{ ...mono, color: TEXT }}>
-                  {r.ticker}
+              <button
+                onClick={() => onPick(r.ticker)}
+                className="w-full grid grid-cols-[1fr_72px_auto] gap-x-3 items-center px-4 py-2 text-left cursor-[inherit]"
+              >
+                <span className="min-w-0">
+                  <span className="block text-sm font-semibold" style={{ ...mono, color: TEXT }}>
+                    {r.ticker}
+                  </span>
+                  <span className="block text-[10px] truncate" style={{ ...mono, color: SUB }}>
+                    {r.sub ?? sparks[r.ticker]?.name ?? ""}
+                  </span>
                 </span>
-                <span className="block text-[10px] truncate" style={{ ...mono, color: SUB }}>
-                  {r.sub ?? sparks[r.ticker]?.name ?? ""}
+                <Sparkline spark={sparks[r.ticker]} />
+                <span className="text-right w-20">
+                  <span className="block text-sm" style={{ ...mono, color: chgColor(chg) }}>
+                    {fmtPrice(q?.c)}
+                  </span>
+                  <span className="block text-xs" style={{ ...mono, color: chgColor(chg) }}>
+                    {fmtPct(chg)}
+                  </span>
                 </span>
-              </span>
-              <Sparkline spark={sparks[r.ticker]} />
-              <span className="text-right w-20">
-                <span className="block text-sm" style={{ ...mono, color: chgColor(chg) }}>
-                  {fmtPrice(q?.c)}
-                </span>
-                <span className="block text-xs" style={{ ...mono, color: chgColor(chg) }}>
-                  {fmtPct(chg)}
-                </span>
-              </span>
-            </button>
+              </button>
+              {r.footer}
+            </div>
           );
         })}
         {rows.length === 0 && (
@@ -880,6 +915,423 @@ function SidePanel({
         )}
       </div>
     </aside>
+  );
+}
+
+// ---------- 止损(持仓行下面那一行 + 单只更新弹窗 + 批量更新弹窗) ----------
+
+const AMBER = "#fbbf24";
+
+/** 持仓行下面:止损价、方式、离现价多远、更新按钮。stops=undefined 表示还在加载 */
+function StopLine({
+  stops,
+  qty,
+  price,
+  error,
+  onEdit,
+}: {
+  stops: StopView[] | undefined;
+  qty: number;
+  price: number | null;
+  error: string | null;
+  onEdit: () => void;
+}) {
+  let label: ReactNode;
+  if (error) label = <span style={{ color: AMBER }} title={error}>止损 读取失败</span>;
+  else if (!stops) label = <span style={{ color: MUTED }}>止损 …</span>;
+  else if (!stops.length) label = <span style={{ color: AMBER }}>止损 未设</span>;
+  else {
+    const prices = [...new Set(stops.map((s) => s.stop))];
+    const bases = [...new Set(stops.map((s) => s.basis))];
+    const covered = stops.reduce((n, s) => n + s.units, 0);
+    const one = prices.length === 1 ? prices[0] : null;
+    const gap = one !== null && price ? ((one - price) / price) * 100 : null;
+    label = (
+      <span style={{ color: SUB }}>
+        止损{" "}
+        <span style={{ color: TEXT }} title={one === null && prices.length === 1 ? "在 Wealthsimple App 里设的,SnapTrade 不回报触发价" : undefined}>
+          {prices.map((p) => (p === null ? "价格未知" : p.toFixed(2))).join(" / ")}
+        </span>
+        {gap !== null && <span style={{ color: MUTED }}> ({gap.toFixed(1)}%)</span>}
+        {bases.length === 1 && bases[0] && (
+          <span style={{ color: bases[0] === "custom" ? SUB : EMA_COLORS[bases[0] === "ema10" ? 10 : 20] }}> · {BASIS_LABEL[bases[0]]}</span>
+        )}
+        {covered < qty - 1e-6 && <span style={{ color: AMBER }}> · 只覆盖 {covered}/{qty} 股</span>}
+      </span>
+    );
+  }
+  return (
+    <div className="flex items-center justify-between gap-2 px-4 pb-2 -mt-1 text-[10px]" style={mono}>
+      <span className="truncate">{label}</span>
+      <button
+        type="button"
+        onClick={onEdit}
+        className="px-1.5 py-0.5 rounded shrink-0 text-[10px] leading-none hover:bg-violet-500/20"
+        style={{ color: "#c4b5fd", border: `1px solid ${BORDER}` }}
+      >
+        更新
+      </button>
+    </div>
+  );
+}
+
+/** 止损弹窗的外壳;busy 时点遮罩 / Esc 不关 */
+function StopModal({ title, busy, onClose, children }: { title: string; busy: boolean; onClose: () => void; children: ReactNode }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose, busy]);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(0,0,0,0.6)" }} onMouseDown={() => !busy && onClose()}>
+      <div
+        role="dialog"
+        aria-label={title}
+        className="w-full max-w-md rounded-lg shadow-2xl flex flex-col max-h-[85vh]"
+        style={{ background: "#0b1020", border: `1px solid ${BORDER}` }}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-4 py-3" style={{ borderBottom: `1px solid ${BORDER}` }}>
+          <span className="text-sm font-bold text-white">{title}</span>
+          <button onClick={onClose} disabled={busy} className="p-1 rounded hover:bg-violet-500/10" style={{ color: SUB }} aria-label="关闭">
+            <X size={15} aria-hidden />
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function PrimaryButton({ children, disabled, busy, title, onClick, type = "button" }: {
+  children: ReactNode;
+  disabled?: boolean;
+  busy?: boolean;
+  title?: string;
+  onClick?: () => void;
+  type?: "button" | "submit";
+}) {
+  return (
+    <button
+      type={type}
+      onClick={onClick}
+      disabled={disabled || busy}
+      title={title}
+      className="px-3 py-1.5 rounded text-xs text-white disabled:cursor-not-allowed"
+      style={{ background: disabled ? "rgba(139,92,246,0.15)" : "rgba(139,92,246,0.55)", opacity: disabled ? 0.45 : busy ? 0.6 : 1 }}
+    >
+      {children}
+    </button>
+  );
+}
+
+/** 一个账户的下单结果 */
+function AccountResult({ a, stop }: { a: SetStopAccountResult; stop: number }) {
+  return (
+    <div className="leading-relaxed" style={{ color: a.error ? (a.unprotected ? UP : AMBER) : TEXT }}>
+      {a.accountName} · {a.units} 股:
+      {a.error ? (a.unprotected ? `‼️ ${a.error}。现在没有止损保护,去 Wealthsimple 手动设一个` : a.error) : `已挂 Stop @ ${stop.toFixed(2)}`}
+    </div>
+  );
+}
+
+/** 触发价的合理性:要低于现价,且不低于现价一半 */
+function stopProblem(stop: number | null, price: number | null): string | null {
+  if (stop === null || !Number.isFinite(stop) || stop <= 0) return "没有触发价";
+  if (price !== null && stop >= price) return "触发价要低于现价,不然会立刻卖出";
+  if (price !== null && stop < price * 0.5) return "比现价低一半以上,像是输错了";
+  return null;
+}
+
+/** 更新一只的止损:EMA10 − 1% / EMA20 − 1% / 自定义;提交 = 撤旧止损 → 按全部持仓挂 Stop GTC */
+function StopDialog({
+  ticker,
+  qty,
+  price,
+  existing,
+  onClose,
+  onDone,
+}: {
+  ticker: string;
+  qty: number;
+  price: number | null;
+  /** null = 没读到(未部署 / 出错),不确定有没有旧止损 */
+  existing: StopView[] | null;
+  onClose: () => void;
+  onDone: (r: SetStopResult) => void;
+}) {
+  // 已有止损就沿用它的方式,否则默认 EMA10
+  const existingBases = [...new Set((existing ?? []).map((s) => s.basis))];
+  const [basis, setBasis] = useState<StopBasis>(existingBases.length === 1 && existingBases[0] ? existingBases[0] : "ema10");
+  const [emas, setEmas] = useState<EmaStops | null>(null);
+  const [input, setInput] = useState(() => {
+    const cur = existing?.length === 1 ? existing[0].stop : null;
+    return cur !== null ? cur.toFixed(2) : "";
+  });
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [result, setResult] = useState<SetStopResult | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    emaStops(ticker)
+      .then((d) => alive && setEmas(d))
+      .catch((e) => alive && setLoadError(`EMA 加载失败:${String((e as Error).message ?? e)}`));
+    return () => {
+      alive = false;
+    };
+  }, [ticker]);
+
+  const stop = basis === "custom" ? (input.trim() ? Number(input) : null) : (emas?.stop[basis] ?? null);
+  const problem = basis !== "custom" && !emas ? (loadError ?? "EMA 计算中…") : stopProblem(stop, price);
+  const gap = stop !== null && price ? ((stop - price) / price) * 100 : null;
+
+  const pickBasis = (b: StopBasis) => {
+    // 切到自定义时,用当前算出来的价格起头,方便微调
+    if (b === "custom" && !input && stop !== null) setInput(stop.toFixed(2));
+    setBasis(b);
+  };
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (problem || submitting || stop === null) return;
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      const r = await setStopLoss(ticker, stop, basis);
+      setResult(r);
+      onDone(r);
+    } catch (err) {
+      setSubmitError(String((err as Error).message ?? err));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const options: { b: StopBasis; label: string; value: string }[] = [
+    { b: "ema10", label: "EMA10 − 1%", value: emas?.stop.ema10?.toFixed(2) ?? (loadError ? "--" : "…") },
+    { b: "ema20", label: "EMA20 − 1%", value: emas?.stop.ema20?.toFixed(2) ?? (loadError ? "--" : "…") },
+    { b: "custom", label: "自定义", value: "手动填" },
+  ];
+
+  return (
+    <StopModal title={`更新止损 · ${ticker}`} busy={submitting} onClose={onClose}>
+      {result ? (
+        <div className="px-4 py-4 flex flex-col gap-2 text-xs" style={mono}>
+          {result.accounts.map((a) => (
+            <AccountResult key={a.accountId} a={a} stop={result.stop} />
+          ))}
+          <div className="self-end mt-2">
+            <PrimaryButton onClick={onClose}>好</PrimaryButton>
+          </div>
+        </div>
+      ) : (
+        <form onSubmit={submit} className="px-4 py-4 flex flex-col gap-3 text-xs" style={mono} autoComplete="off">
+          <div className="flex items-center justify-between gap-3" style={{ color: SUB }}>
+            <span>持仓 {qty} 股 · 现价 <span style={{ color: TEXT }}>{fmtPrice(price)}</span></span>
+            <span>
+              <span style={{ color: EMA_COLORS[10] }}>EMA10 {fmtPrice(emas?.ema10)}</span> ·{" "}
+              <span style={{ color: EMA_COLORS[20] }}>EMA20 {fmtPrice(emas?.ema20)}</span>
+            </span>
+          </div>
+
+          <div className="grid grid-cols-3 gap-1.5" role="radiogroup" aria-label="止损方式">
+            {options.map((o) => (
+              <button
+                key={o.b}
+                type="button"
+                role="radio"
+                aria-checked={basis === o.b}
+                onClick={() => pickBasis(o.b)}
+                className="px-2 py-1.5 rounded text-xs flex flex-col items-center gap-0.5"
+                style={{
+                  border: `1px solid ${basis === o.b ? "#8b5cf6" : BORDER}`,
+                  background: basis === o.b ? "rgba(139,92,246,0.22)" : "transparent",
+                  color: basis === o.b ? "#fff" : SUB,
+                }}
+              >
+                <span>{o.label}</span>
+                <span style={{ color: basis === o.b ? TEXT : MUTED }}>{o.value}</span>
+              </button>
+            ))}
+          </div>
+
+          {basis === "custom" ? (
+            <label className="flex items-center gap-2 text-xs">
+              <span style={{ color: SUB }}>触发价</span>
+              <input
+                type="number"
+                inputMode="decimal"
+                step="0.01"
+                min="0"
+                name="stop-price"
+                data-1p-ignore
+                data-lpignore="true"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                autoFocus
+                className="w-28 px-2 py-1.5 rounded outline-none text-sm"
+                style={{ ...mono, background: "rgba(139,92,246,0.08)", border: `1px solid ${BORDER}`, color: TEXT }}
+              />
+              {gap !== null && <span style={{ color: MUTED }}>{gap.toFixed(2)}%</span>}
+            </label>
+          ) : (
+            <div style={{ color: SUB }}>
+              触发价 <span style={{ color: TEXT }}>{fmtPrice(stop)}</span>
+              {gap !== null && <span style={{ color: MUTED }}> ({gap.toFixed(2)}%)</span>}
+              <span style={{ color: MUTED }}> · 批量更新时会跟着当天 {BASIS_LABEL[basis]} 重算</span>
+            </div>
+          )}
+
+          {problem && (basis === "custom" ? input.trim() !== "" : !!emas) && (
+            <div style={{ color: basis !== "custom" && stop !== null && price !== null && stop >= price ? AMBER : UP }}>
+              {basis !== "custom" && stop !== null && price !== null && stop >= price
+                ? `现价已跌破 ${BASIS_LABEL[basis]},这个价格会立刻卖出。换一个方式或自定义`
+                : problem}
+            </div>
+          )}
+
+          <div className="leading-relaxed" style={{ color: SUB }}>
+            现在:
+            {existing === null
+              ? "读取失败,不确定"
+              : existing.length
+                ? existing
+                    .map((s) => `${s.stop === null ? "价格未知" : s.stop.toFixed(2)}${s.basis ? ` ${BASIS_LABEL[s.basis]}` : ""}(${s.units} 股)`)
+                    .join("、")
+                : "没有止损"}
+            <br />
+            提交后{existing?.length !== 0 ? "先撤掉现有止损(如果有),再" : ""}卖出 {qty} 股 · Stop · GTC。
+            {existing?.length !== 0 && <span style={{ color: AMBER }}>撤单到新单挂上之间约 1–2 秒没有保护。</span>}
+          </div>
+
+          {submitError && <div style={{ color: UP }}>{submitError}</div>}
+
+          <div className="flex justify-end gap-2 pt-1">
+            <button type="button" onClick={onClose} disabled={submitting} className="px-3 py-1.5 rounded text-xs hover:bg-white/5" style={{ color: SUB }}>
+              取消
+            </button>
+            <PrimaryButton type="submit" disabled={!!problem} busy={submitting} title={problem ?? undefined}>
+              {submitting ? "提交中…" : `确认 Stop @ ${fmtPrice(stop)}`}
+            </PrimaryButton>
+          </div>
+        </form>
+      )}
+    </StopModal>
+  );
+}
+
+type BatchStatus = { state: "pending" | "running" | "done" | "failed"; result?: SetStopResult; error?: string };
+
+/**
+ * 批量更新:把方式是 EMA10 / EMA20 的止损按当天 EMA 重算后重新挂;EMA 比昨天低的、自定义价格的不动。
+ * 先列计划给你看,确认后一只一只来(每只都是撤旧 → 挂新)。
+ */
+function BatchStopDialog({
+  stops,
+  prices,
+  onClose,
+  onDone,
+}: {
+  stops: StopsByTicker;
+  prices: Record<string, number | null>;
+  onClose: () => void;
+  onDone: (r: SetStopResult) => void;
+}) {
+  const [plan, setPlan] = useState<BatchPlanRow[] | null>(null);
+  const [status, setStatus] = useState<Record<string, BatchStatus>>({});
+  const [running, setRunning] = useState(false);
+  const [finished, setFinished] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    planBatch(stops, prices).then((p) => alive && setPlan(p.sort((a, b) => Number(!!a.skip) - Number(!!b.skip) || a.ticker.localeCompare(b.ticker))));
+    return () => {
+      alive = false;
+    };
+    // 计划只在打开时算一次,之后报价变了也不重算(要重算就关了再开)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const todo = (plan ?? []).filter((r) => !r.skip && r.next !== null && r.basis);
+  const run = async () => {
+    setRunning(true);
+    for (const r of todo) {
+      setStatus((s) => ({ ...s, [r.ticker]: { state: "running" } }));
+      try {
+        const res = await setStopLoss(r.ticker, r.next!, r.basis!);
+        onDone(res);
+        setStatus((s) => ({ ...s, [r.ticker]: { state: res.ok ? "done" : "failed", result: res } }));
+      } catch (e) {
+        setStatus((s) => ({ ...s, [r.ticker]: { state: "failed", error: String((e as Error).message ?? e) } }));
+      }
+    }
+    setRunning(false);
+    setFinished(true);
+  };
+
+  return (
+    <StopModal title="批量更新止损" busy={running} onClose={onClose}>
+      <div className="px-4 py-3 flex flex-col gap-3 text-xs overflow-y-auto" style={mono}>
+        <div className="leading-relaxed" style={{ color: SUB }}>
+          EMA10 / EMA20 方式的止损按今天的 EMA − 1% 重新挂;EMA 比昨天低的、自定义价格的不动。
+          <span style={{ color: AMBER }}> 每只都是先撤旧单再挂新单,中间约 1–2 秒没有保护。</span>
+        </div>
+        {!plan ? (
+          <div style={{ color: MUTED }}>计算中…</div>
+        ) : plan.length === 0 ? (
+          <div style={{ color: MUTED }}>没有挂着的止损</div>
+        ) : (
+          <div className="flex flex-col">
+            {plan.map((r) => {
+              const st = status[r.ticker];
+              const up = r.current !== null && r.next !== null ? r.next > r.current : null;
+              return (
+                <div key={r.ticker} className="py-1.5 flex flex-col gap-0.5" style={{ borderBottom: "1px solid rgba(139,92,246,0.07)", opacity: r.skip ? 0.55 : 1 }}>
+                  <div className="grid grid-cols-[52px_52px_1fr_auto] gap-2 items-center">
+                    <span style={{ color: TEXT }}>{r.ticker}</span>
+                    <span style={{ color: r.basis && r.basis !== "custom" ? EMA_COLORS[r.basis === "ema10" ? 10 : 20] : SUB }}>
+                      {r.basis ? BASIS_LABEL[r.basis] : "未知"}
+                    </span>
+                    <span style={{ color: SUB }}>
+                      {fmtPrice(r.current)}
+                      {r.next !== null && !r.skip && (
+                        <>
+                          {" → "}
+                          <span style={{ color: up === null ? TEXT : up ? UP : DOWN }}>{r.next.toFixed(2)}</span>
+                        </>
+                      )}
+                    </span>
+                    <span className="text-right" style={{ color: st?.state === "failed" ? UP : st?.state === "done" ? DOWN : MUTED }}>
+                      {r.skip ?? (st ? { pending: "", running: "提交中…", done: "已更新", failed: "失败" }[st.state] : "")}
+                    </span>
+                  </div>
+                  {st?.state === "failed" &&
+                    (st.result ? (
+                      st.result.accounts.filter((a) => a.error).map((a) => <AccountResult key={a.accountId} a={a} stop={st.result!.stop} />)
+                    ) : (
+                      <div style={{ color: UP }}>{st.error}</div>
+                    ))}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <div className="flex justify-end gap-2 pt-1">
+          <button type="button" onClick={onClose} disabled={running} className="px-3 py-1.5 rounded text-xs hover:bg-white/5" style={{ color: SUB }}>
+            {finished ? "关闭" : "取消"}
+          </button>
+          {!finished && (
+            <PrimaryButton onClick={run} disabled={!todo.length} busy={running}>
+              {running ? "更新中…" : `更新 ${todo.length} 只`}
+            </PrimaryButton>
+          )}
+        </div>
+      </div>
+    </StopModal>
   );
 }
 
@@ -1236,6 +1688,7 @@ function CandleChart({
   data,
   marks,
   avgCost,
+  stopPrices,
   viewKey,
   resetNonce,
   barSpacing,
@@ -1247,6 +1700,8 @@ function CandleChart({
   data: CandleData | null;
   marks: BarTrades[];
   avgCost: number | null;
+  /** 挂着的止损价(各账户可能不同),画红色虚线 */
+  stopPrices: number[];
   /** 换周期/盘前盘后/默认视野设置时变,视野重置到默认;换股票不重置,沿用当前的缩放和滚动位置 */
   viewKey: string;
   /** 刷新键 +1,视野重置到默认 */
@@ -1263,6 +1718,7 @@ function CandleChart({
   const emaRefs = useRef<Record<number, ISeriesApi<"Line">>>({});
   const marksPrimRef = useRef<TradeMarksPrimitive | null>(null);
   const costLineRef = useRef<IPriceLine | null>(null);
+  const stopLinesRef = useRef<IPriceLine[]>([]);
   // 上次定位视野时的 symbol / viewKey / resetNonce;同一组下的轮询刷新不动用户拖过的视野
   const fittedRef = useRef<{ symbol: string; viewKey: string; resetNonce: number } | null>(null);
   // 用户当前的横向视野(缩放 + 最后一根离右边几根 bar),换股票时照搬过去
@@ -1454,6 +1910,26 @@ function CandleChart({
           })
         : null;
   }, [avgCost]);
+
+  // 止损线:红色虚线
+  const stopKey = stopPrices.join(",");
+  useEffect(() => {
+    const series = candleRef.current;
+    if (!series) return;
+    for (const l of stopLinesRef.current) series.removePriceLine(l);
+    stopLinesRef.current = stopKey
+      ? stopKey.split(",").map((p) =>
+          series.createPriceLine({
+            price: Number(p),
+            color: UP,
+            lineWidth: 1,
+            lineStyle: LineStyle.Dashed,
+            axisLabelVisible: true,
+            title: "止损",
+          })
+        )
+      : [];
+  }, [stopKey]);
 
   // 十字光标 → 顶部图例;移出图表回到最后一根
   useEffect(() => {
@@ -1688,6 +2164,10 @@ export default function ChartPage() {
   const [listSort, setListSortState] = useState<ListSort>(() => readJson<ListSort>(SORT_KEY, null));
   const [managingLists, setManagingLists] = useState(false);
   const [holdingsOrder, setHoldingsOrder] = useState<string[]>(() => readJson<string[]>(HOLDINGS_ORDER_KEY, []));
+  const [stops, setStops] = useState<StopsByTicker | null>(null);
+  const [stopsError, setStopsError] = useState<string | null>(null);
+  const [stopTicker, setStopTicker] = useState<string | null>(null);
+  const [batchStops, setBatchStops] = useState(false);
 
   // 美股持仓:同一 ticker 跨账户合并
   const holdings = useMemo<Holding[]>(() => {
@@ -1749,6 +2229,7 @@ export default function ChartPage() {
     try {
       const r = await runSnaptradeSync();
       await loadTrades();
+      loadStops();
       const n = r.newTrades + r.newCash;
       setRefreshNote(`${new Date().toLocaleTimeString()} 已刷新:${n ? `新增交易 ${r.newTrades} / 现金 ${r.newCash}` : "没有新成交"}`);
     } catch (e) {
@@ -1757,6 +2238,19 @@ export default function ChartPage() {
       setRefreshing(false);
     }
   };
+
+  // ---- 止损:持仓行下面显示,订单不常变,进页面、刷新持仓、改完止损时各拉一次 ----
+  const loadStops = useCallback(() => {
+    fetchStopOrders()
+      .then((s) => {
+        setStops(s);
+        setStopsError(null);
+      })
+      .catch((e) => setStopsError(String((e as Error).message ?? e)));
+  }, []);
+  useEffect(loadStops, [loadStops]);
+  /** 改完一只:用返回里这只股票的最新止损替换 */
+  const applyStopResult = (r: SetStopResult) => setStops((prev) => ({ ...(prev ?? {}), [r.ticker]: r.stops[r.ticker] ?? [] }));
 
   // ---- 自选列表 ----
   useEffect(() => {
@@ -1896,9 +2390,18 @@ export default function ChartPage() {
             {h.qty}股 · 持仓 <span style={{ color: chgColor(pnlPct) }}>{fmtPct(pnlPct)}</span>
           </>
         ),
+        footer: (
+          <StopLine
+            stops={stops ? (stops[h.ticker] ?? []) : undefined}
+            qty={h.qty}
+            price={q?.c ?? null}
+            error={stopsError}
+            onEdit={() => setStopTicker(h.ticker)}
+          />
+        ),
       };
     });
-  }, [activeList, holdings, holdingsOrder, liveQuotes]);
+  }, [activeList, holdings, holdingsOrder, liveQuotes, stops, stopsError]);
 
   // 左侧报价:30 秒一次,页面在后台时不拉。当前打开的股票也一起拉(不在列表里时标题要用)
   const tickerKey = [...new Set([...rows.map((r) => r.ticker), symbol].filter(Boolean))].join(",");
@@ -1975,6 +2478,12 @@ export default function ChartPage() {
     [shown, symbolTrades, period]
   );
 
+  // 当前股票挂着的止损价(价格未知的画不了)
+  const symbolStops = useMemo(
+    () => [...new Set((stops?.[symbol] ?? []).map((s) => s.stop).filter((p): p is number => p !== null))].sort((a, b) => a - b),
+    [stops, symbol]
+  );
+
   const quote = liveQuotes?.usd[symbol] ?? null;
   const price = quote?.c ?? shown?.candles[shown.candles.length - 1]?.close ?? null;
   const prevClose = quote?.pc ?? (data ? previousDayClose(data.candles, period) : null);
@@ -1994,6 +2503,7 @@ export default function ChartPage() {
     document.title =
       price === null ? symbol : `${symbol} ${fmtPrice(price)} ${fmtPct(dayChg)}${holdPct === null ? "" : ` 持${fmtPct(holdPct)}`}`;
   }, [symbol, price, dayChg, holdPct]);
+  useFavicon(stockFaviconHref(dayChg == null || dayChg === 0 ? undefined : dayChg > 0 ? UP : DOWN));
 
   return (
     <div className="min-h-screen lg:h-screen flex flex-col" style={{ background: BG, fontFamily: "'Inter', sans-serif" }}>
@@ -2016,6 +2526,7 @@ export default function ChartPage() {
           onRefresh={refreshHoldings}
           refreshing={refreshing}
           refreshNote={refreshNote}
+          onBatchStops={stops ? () => setBatchStops(true) : null}
         />
         {managingLists && (
           <ListManager
@@ -2025,6 +2536,24 @@ export default function ChartPage() {
             onRename={renameListTo}
             onDelete={removeList}
             onReorder={reorderLists}
+          />
+        )}
+        {stopTicker && (
+          <StopDialog
+            ticker={stopTicker}
+            qty={holdings.find((h) => h.ticker === stopTicker)?.qty ?? 0}
+            price={liveQuotes?.usd[stopTicker]?.c ?? null}
+            existing={stops ? (stops[stopTicker] ?? []) : null}
+            onClose={() => setStopTicker(null)}
+            onDone={applyStopResult}
+          />
+        )}
+        {batchStops && stops && (
+          <BatchStopDialog
+            stops={stops}
+            prices={Object.fromEntries(holdings.map((h) => [h.ticker, liveQuotes?.usd[h.ticker]?.c ?? null]))}
+            onClose={() => setBatchStops(false)}
+            onDone={applyStopResult}
           />
         )}
 
@@ -2104,7 +2633,7 @@ export default function ChartPage() {
               左边选一只股票,或输入代码
             </div>
           )}
-          <CandleChart symbol={symbol} period={period} data={shown} marks={marks} avgCost={holding?.avgCost ?? null} viewKey={`${period}|${settings.extendedHours}|${settings.barSpacing}|${settings.lastBarAt}`} resetNonce={resetNonce} barSpacing={settings.barSpacing} lastBarAt={settings.lastBarAt} markColors={settings.markColors} />
+          <CandleChart symbol={symbol} period={period} data={shown} marks={marks} avgCost={holding?.avgCost ?? null} stopPrices={symbolStops} viewKey={`${period}|${settings.extendedHours}|${settings.barSpacing}|${settings.lastBarAt}`} resetNonce={resetNonce} barSpacing={settings.barSpacing} lastBarAt={settings.lastBarAt} markColors={settings.markColors} />
           <div className="flex flex-wrap gap-x-4 px-4 py-2 text-[10px]" style={{ ...mono, color: MUTED, borderTop: `1px solid ${BORDER}` }}>
             <span><b style={{ color: settings.markColors.B }}>B</b> 买入</span>
             <span><b style={{ color: settings.markColors.S }}>S</b> 卖出</span>
