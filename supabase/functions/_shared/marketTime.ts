@@ -44,8 +44,13 @@ export function etMarketClosedToday(now: Date = new Date()): boolean {
   return etParts(now).minutes >= 16 * 60 + 10;
 }
 
-/** 最近一个已经完整收盘的美东日期:收盘后是今天,否则是昨天(不考虑周末假日,调用方用"是否有K线"判断)。 */
+/** 最近一个已经完整收盘的美东日期:收盘后是今天,否则是前一天;落在周末就退回周五
+ *  (假日不考虑,调用方用"是否有K线"判断)。 */
 export function lastClosedEtDate(now: Date = new Date()): string {
   const { date } = etParts(now);
-  return etMarketClosedToday(now) ? date : addDaysStr(date, -1);
+  let d = etMarketClosedToday(now) ? date : addDaysStr(date, -1);
+  for (let dow = new Date(`${d}T00:00:00Z`).getUTCDay(); dow === 0 || dow === 6; dow = new Date(`${d}T00:00:00Z`).getUTCDay()) {
+    d = addDaysStr(d, -1);
+  }
+  return d;
 }

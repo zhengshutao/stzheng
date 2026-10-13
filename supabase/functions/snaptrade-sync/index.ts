@@ -18,8 +18,14 @@ import "jsr:@supabase/functions-js@2/edge-runtime.d.ts";
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { Snaptrade, SnaptradeAuth } from "npm:snaptrade-typescript-sdk@12.2.14";
 import { runSnaptradeSync } from "../_shared/snaptradeSync.mjs";
+import { syncPrices } from "../_shared/priceSync.mjs";
+import { lastClosedEtDate } from "../_shared/marketTime.ts";
 
 const SINCE_DAYS = 14;
+// 没有新成交时收盘价也要补(否则收盘后没交易,当天就一直是实时价)。syncPrices 只拉落后的标的,
+// 但还持有的票当天没K线(假日 / 雅虎还没出)会每次重拉,所以定时任务最多每小时跑一次;
+// 例外:上次检查之后又过了一次收盘(美东 16:10),马上跑。手动触发不限。
+const PRICE_SYNC_INTERVAL_MS = 55 * 60 * 1000;
 
 const DEFAULT_ORIGINS = [
   "https://www.stzheng.com",
@@ -64,6 +70,31 @@ function snapAdapter() {
 }
 
 const daysAgo = (n: number) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+
+async function maybeSyncPrices(service: ReturnType<typeof createClient>, ownerId: string, trigger: "cron" | "manual") {
+  if (trigger === "cron") {
+    const { data } = await service.from("sync_runs").select("checked_at").eq("user_id", ownerId).eq("source", "prices").maybeSingle();
+    const last = data ? new Date(data.checked_at) : null;
+    const crossedClose = !last || lastClosedEtDate(last) < lastClosedEtDate();
+    if (last && !crossedClose && Date.now() - last.getTime() < PRICE_SYNC_INTERVAL_MS) return;
+  }
+  let ok = true;
+  let message = "";
+  try {
+    const r = await syncPrices({ client: service, userId: ownerId });
+    message = r.missingTable
+      ? "stock_prices 表不存在"
+      : `拉取 ${r.fetched.length} 个标的 ${r.bars} 天,收盘价截至 ${r.lastClosed}` + (r.errors.length ? `,出错 ${r.errors.length}` : "");
+  } catch (e) {
+    ok = false;
+    message = String((e as Error)?.message ?? e).slice(0, 200);
+  }
+  const { error } = await service
+    .from("sync_runs")
+    .upsert({ user_id: ownerId, source: "prices", checked_at: new Date().toISOString(), ok, message, trigger }, { onConflict: "user_id,source" });
+  if (error) console.error(`snaptrade-sync: prices sync_runs upsert failed: ${error.message}`);
+  if (!ok) console.error(`snaptrade-sync: price sync failed: ${message}`);
+}
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders(req) });
@@ -119,6 +150,9 @@ Deno.serve(async (req: Request) => {
     // snapError 已经脱敏(去掉回显的 clientId);其它错误只留前 200 个字
     message = String((e as Error)?.message ?? e).replace(/(provided)\s*-\s*\S+/gi, "$1").slice(0, 200);
   }
+
+  // 有新记录时 applyToSupabase 已经顺带同步过收盘价
+  if (ok && !newTrades && !newCash) await maybeSyncPrices(service, ownerId, trigger);
 
   const { error: runError } = await service.from("sync_runs").upsert(
     {

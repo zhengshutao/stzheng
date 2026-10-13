@@ -23,10 +23,9 @@ import { computePositions } from "@/app/lib/stockPositions";
 import { priceKey, type MarkSource } from "@/app/lib/dailyPnl";
 import { fetchQuotes } from "@/app/lib/stockApi";
 import { syncBankItems } from "@/app/lib/bankApi";
-import { etMarketClosedToday, etToday, lastClosedEtDate } from "@/app/lib/marketTime";
-import { helperStatus, startPriceSync, startWealthsimpleSync, waitForHelper } from "@/app/lib/localHelper";
+import { etToday, lastClosedEtDate } from "@/app/lib/marketTime";
+import { runSnaptradeSync } from "@/app/lib/portfolioApi";
 import { useCurrency } from "@/app/lib/CurrencyContext";
-import { useAuth } from "@/app/lib/AuthContext";
 
 const mono = { fontFamily: "'JetBrains Mono', monospace" };
 const display = { fontFamily: "'Exo 2', sans-serif" };
@@ -144,12 +143,10 @@ function CalendarView(props: {
           const isToday = ds === today;
           const isSelected = ds === selected;
           const hasData = Math.abs(net) >= 0.005;
-          const provisional = scope !== "daily" && Boolean(agg?.provisional);
           return (
             <button
               key={ds}
               onClick={() => onSelect(ds)}
-              title={provisional ? "含实时价/未同步收盘价,数字还会变" : undefined}
               className="rounded-lg px-0.5 pt-1.5 pb-2 min-h-[58px] flex flex-col items-center gap-1 transition-all overflow-hidden"
               style={{
                 background: isSelected ? "rgba(139,92,246,0.22)" : hasData ? "rgba(139,92,246,0.06)" : "transparent",
@@ -169,10 +166,9 @@ function CalendarView(props: {
               {hasData && (
                 <span
                   className="text-[10px] leading-none font-semibold"
-                  style={{ ...mono, color: netColor(net), opacity: provisional ? 0.7 : 1 }}
+                  style={{ ...mono, color: netColor(net) }}
                 >
                   {fmtCad(net, { sign: true, ccy })}
-                  {provisional && "~"}
                 </span>
               )}
             </button>
@@ -209,9 +205,8 @@ function DayDetail(props: {
   ccy: "USD" | "CAD";
   fx: number;
   dayPnl: DayPnl | undefined;
-  today: string;
 }) {
-  const { date, data, scope, ccy, fx, dayPnl, today } = props;
+  const { date, data, scope, ccy, fx, dayPnl } = props;
 
   const box = {
     background: "rgba(10,14,28,0.82)",
@@ -272,15 +267,9 @@ function DayDetail(props: {
             <span className="text-lg font-bold" style={{ ...display, color: netColor(stockTotal) }}>
               {fmtCad(stockTotal, { sign: true, ccy })}
             </span>
-            {dayPnl?.provisional && (
+            {data.priceTableMissing && (
               <span className="text-[10px]" style={{ ...mono, color: WARN }}>
-                {data.priceTableMissing
-                  ? "收盘价表还没建,昨收只能用成交价,不准"
-                  : date === today && !etMarketClosedToday()
-                    ? "盘中实时价,收盘后同步行情变为最终值"
-                    : date === today
-                      ? "已收盘,收盘价还没同步:点右边\"更新行情\""
-                      : "部分价格未同步,数字还会变"}
+                收盘价表还没建,昨收只能用成交价,不准
               </span>
             )}
           </div>
@@ -549,7 +538,6 @@ function ImportLogCard({ log }: { log: ImportLog }) {
 
 function SyncPanel(props: { data: DashboardData; onReload: () => Promise<void>; today: string }) {
   const { data, onReload, today } = props;
-  const { session } = useAuth();
   const [syncing, setSyncing] = useState<string | null>(null);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const [logsOpen, setLogsOpen] = useState(false);
@@ -575,63 +563,20 @@ function SyncPanel(props: { data: DashboardData; onReload: () => Promise<void>; 
     return { ...item, syncedAt };
   });
 
-  const waitForWealthsimple = async () => {
-    const status = await waitForHelper((s) => s.running, 180);
-    if (!status) {
-      setSyncMessage("Wealthsimple 还在同步中,稍后刷新页面查看。");
-      return;
-    }
-    const output = (status.lastRun?.output ?? []) as string[];
-    const failed = output.find((line) => /failed|error/i.test(line) && !/errors? 0\b|出错 0/.test(line));
-    if (status.lastRun?.exitCode && status.lastRun.exitCode !== 0) {
-      setSyncMessage(`Wealthsimple 下载完成,但导入失败: ${failed ?? `exit ${status.lastRun.exitCode}`}`);
-      await onReload();
-      return;
-    }
-    setSyncMessage("Wealthsimple 同步完成,日历已刷新 —— 变动明细见下方同步日志。");
-    await onReload();
-  };
-
-  const handlePriceSync = async () => {
-    setSyncing("prices");
-    setSyncMessage(null);
-    try {
-      const r = await startPriceSync(session?.user.id);
-      setSyncMessage(r.message === "Price sync is already running." ? "行情同步已经在运行。" : "行情同步已启动…");
-      const status = await waitForHelper((s) => Boolean(s.prices?.running), 120);
-      if (!status) {
-        setSyncMessage("行情同步还在跑,稍后刷新。");
-      } else if (status.prices?.lastRun?.exitCode) {
-        const out = status.prices.lastRun.output ?? [];
-        setSyncMessage(`行情同步失败: ${out[out.length - 1] ?? `exit ${status.prices.lastRun.exitCode}`}`);
-      } else {
-        const out = status.prices?.lastRun?.output ?? [];
-        setSyncMessage(`行情已更新: ${out[out.length - 1] ?? "完成"}`);
-      }
-      await onReload();
-    } catch (e) {
-      setSyncMessage(`请先启动本地 helper: npm run ws:helper (${String((e as Error).message ?? e)})`);
-    } finally {
-      setSyncing(null);
-    }
-  };
-
   const handleUpdate = async (key: string, label: string, terms: readonly string[]) => {
     setSyncing(key);
     setSyncMessage(null);
     if (key === "wealthsimple") {
       try {
-        const result = await startWealthsimpleSync(session?.user.id);
-        if (result.message === "Wealthsimple sync is already running.") {
-          setSyncMessage("Wealthsimple 同步已经在运行,继续在打开的浏览器里登录并下载 CSV。");
-        } else if (result.canApply) {
-          setSyncMessage("Wealthsimple 同步已启动,登录后下载 CSV 会自动导入 + 同步收盘价。");
-        } else {
-          setSyncMessage("Wealthsimple 同步已启动,但缺少 Supabase 导入配置或登录用户。");
-        }
-        waitForWealthsimple().catch((e) => setSyncMessage(`无法读取本地同步状态: ${String((e as Error).message ?? e)}`));
+        const r = await runSnaptradeSync();
+        setSyncMessage(
+          r.newTrades || r.newCash
+            ? `SnapTrade 同步完成:新增交易 ${r.newTrades} / 现金 ${r.newCash},收盘价已一并更新。`
+            : "SnapTrade 没有新交易,收盘价已检查更新。"
+        );
+        await onReload();
       } catch (e) {
-        setSyncMessage(`请先启动本地 helper: npm run ws:helper (${String((e as Error).message ?? e)})`);
+        setSyncMessage(`SnapTrade 同步失败: ${String((e as Error).message ?? e)}`);
       } finally {
         setSyncing(null);
       }
@@ -680,7 +625,7 @@ function SyncPanel(props: { data: DashboardData; onReload: () => Promise<void>; 
           className="rounded-md px-3 py-2 mb-3 text-[10px]"
           style={{ ...mono, color: WARN, background: "rgba(251,191,36,0.06)", border: "1px solid rgba(251,191,36,0.3)" }}
         >
-          收盘价表(stock_prices)还没建:在 Supabase SQL Editor 执行 supabase/schema.sql 末尾那段,再点"更新行情"。
+          收盘价表(stock_prices)还没建:在 Supabase SQL Editor 执行 supabase/schema.sql 末尾那段,再点 Wealthsimple 的"更新"。
           在那之前日历只能用成交价/实时价推算。
         </div>
       )}
@@ -744,19 +689,8 @@ function SyncPanel(props: { data: DashboardData; onReload: () => Promise<void>; 
                 className="px-3 py-1.5 rounded-md text-[10px] font-bold transition-all hover:opacity-90"
                 style={btnStyle(syncing === row.key)}
               >
-                {syncing === row.key ? "启动中" : "更新"}
+                {syncing === row.key ? "同步中" : "更新"}
               </button>
-              {row.key === "wealthsimple" && (
-                <button
-                  onClick={handlePriceSync}
-                  disabled={syncing === "prices"}
-                  title="只同步收盘价(不下载 WS)。收盘后点一下,今天的盈亏就从实时价变成收盘价。"
-                  className="px-3 py-1.5 rounded-md text-[10px] font-bold transition-all hover:opacity-90"
-                  style={{ ...mono, color: "#a78bfa", background: "rgba(139,92,246,0.12)", border: "1px solid rgba(139,92,246,0.3)", opacity: syncing === "prices" ? 0.6 : 1 }}
-                >
-                  {syncing === "prices" ? "同步中" : "更新行情"}
-                </button>
-              )}
             </div>
           </div>
         ))}
@@ -801,7 +735,6 @@ const SCOPES: { key: Scope; label: string }[] = [
 export default function DashboardPage(props: { initialData?: DashboardData; initialScope?: Scope; initialSelected?: string }) {
   const { initialData, initialScope, initialSelected } = props;
   const { currency: ccy } = useCurrency();
-  const { session } = useAuth();
   const [data, setData] = useState<DashboardData | null>(initialData ?? null);
   const [error, setError] = useState<string | null>(null);
   const [scope, setScope] = useState<Scope>(initialScope ?? "all");
@@ -852,31 +785,6 @@ export default function DashboardPage(props: { initialData?: DashboardData; init
         // 拿不到实时行情就算了,退回收盘价/成交价的兜底逻辑
       });
   }, [data, today]);
-
-  // 收盘价落后于最近一个交易日、且本地 helper 在跑 → 自动补一次行情,不用手点
-  useEffect(() => {
-    if (!data || data.priceTableMissing) return;
-    const coverage = priceCoverage(data);
-    const lastClosed = lastClosedEtDate();
-    if (!coverage.heldThrough || coverage.heldThrough >= lastClosed) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const status = await helperStatus();
-        if (cancelled || status.prices?.running) return;
-        await startPriceSync(session?.user.id);
-        const done = await waitForHelper((s) => Boolean(s.prices?.running), 120);
-        if (!cancelled && done && !done.prices?.lastRun?.exitCode) await reloadData();
-      } catch {
-        // helper 没开就算了,面板上会提示"收盘价至 X(应到 Y)"
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-    // 只在数据的覆盖范围变化时判断一次,避免反复触发
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data ? priceCoverage(data).heldThrough : null, data?.priceTableMissing]);
 
   const fx = useMemo(() => (data ? latestFx(data, liveFx) : 1.37), [data, liveFx]);
   const pnlByDay = useMemo(() => (data ? buildDailyPnl(data, today, liveMarks ?? undefined) : new Map<string, DayPnl>()), [data, today, liveMarks]);
@@ -987,7 +895,6 @@ export default function DashboardPage(props: { initialData?: DashboardData; init
                   ccy={ccy}
                   fx={fx}
                   dayPnl={selected ? pnlByDay.get(selected) : undefined}
-                  today={today}
                 />
               )}
             </div>
