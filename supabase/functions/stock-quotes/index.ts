@@ -18,6 +18,10 @@ interface Quote {
   c: number;
   o: number;
   pc: number | null;
+  /** 非常规时段才有:最近一个常规交易日的收盘价和它的前收(列表第一行) */
+  reg?: { c: number; pc: number | null };
+  /** 非常规时段才有:盘前/盘后最新成交价(列表第二行,涨跌相对 reg.c) */
+  ext?: { p: number; session: "pre" | "post" };
 }
 
 // ---------- 雅虎财经公开 chart 接口 ----------
@@ -26,6 +30,20 @@ interface Bars {
   timestamps: number[];
   open: number[];
   close: number[];
+}
+
+function etParts(date: Date): { weekday: string; mins: number } {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    weekday: "short",
+    hour: "numeric",
+    minute: "numeric",
+    hourCycle: "h23",
+  }).formatToParts(date);
+  const weekday = parts.find((p) => p.type === "weekday")?.value ?? "";
+  const hour = Number(parts.find((p) => p.type === "hour")?.value ?? 0);
+  const minute = Number(parts.find((p) => p.type === "minute")?.value ?? 0);
+  return { weekday, mins: hour * 60 + minute };
 }
 
 async function fetchChart(
@@ -93,33 +111,35 @@ async function getCadQuote(ticker: string): Promise<Quote | null> {
 // ---------- 美股盘前/盘后判断(美东时间) ----------
 
 function usExtendedHours(): boolean {
-  const now = new Date();
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
-    weekday: "short",
-    hour: "numeric",
-    minute: "numeric",
-    hourCycle: "h23",
-  }).formatToParts(now);
-  const weekday = parts.find((p) => p.type === "weekday")?.value ?? "";
-  const hour = Number(parts.find((p) => p.type === "hour")?.value ?? 0);
-  const minute = Number(parts.find((p) => p.type === "minute")?.value ?? 0);
+  const { weekday, mins } = etParts(new Date());
   if (weekday === "Sat" || weekday === "Sun") return false;
-  const mins = hour * 60 + minute;
   return (mins >= 240 && mins < 570) || (mins >= 960 && mins < 1200);
+}
+
+/** 工作日 9:30–16:00 = 常规时段;其余时间(含夜里和周末)列表要显示盘前/盘后那一行 */
+function usRegularHours(): boolean {
+  const { weekday, mins } = etParts(new Date());
+  if (weekday === "Sat" || weekday === "Sun") return false;
+  return mins >= 570 && mins < 960;
 }
 
 function todayEtDateString(): string {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(new Date());
 }
 
-/** 返回 [盘前盘后最新价, 上一个正常交易日收盘价] */
-async function yfExtendedQuote(ticker: string): Promise<[number | null, number | null]> {
+/** 返回 [盘前盘后最新价, 上一个正常交易日收盘价, 最新价所在时段(落在常规时段里 = null)] */
+async function yfExtendedQuote(ticker: string): Promise<[number | null, number | null, "pre" | "post" | null]> {
   const [intra, daily] = await Promise.all([
     fetchChart(ticker, "1d", "1m", true),
     fetchChart(ticker, "5d", "1d"),
   ]);
-  const ext = intra ? lastValid(intra.close)?.value ?? null : null;
+  const last = intra ? lastValid(intra.close) : null;
+  const ext = last?.value ?? null;
+  let session: "pre" | "post" | null = null;
+  if (last && intra) {
+    const { mins } = etParts(new Date(intra.timestamps[last.index] * 1000));
+    session = mins < 570 ? "pre" : mins >= 960 ? "post" : null;
+  }
   let prevClose: number | null = null;
   if (daily) {
     const todayEt = todayEtDateString();
@@ -136,7 +156,7 @@ async function yfExtendedQuote(ticker: string): Promise<[number | null, number |
       }
     }
   }
-  return [ext, prevClose];
+  return [ext, prevClose, session];
 }
 
 // ---------- 期权报价(雅虎 chart 接口,免 key,和股票走同一个接口) ----------
@@ -231,15 +251,23 @@ async function getUsdQuote(ticker: string, finnhubKey: string): Promise<Quote | 
       // ignore, fall through to extended-hours-only result below
     }
   }
-  if (usExtendedHours()) {
-    const [ext, prevPc] = await yfExtendedQuote(ticker);
-    if (ext !== null || prevPc !== null) {
-      if (result === null) {
-        result = { c: ext ?? prevPc ?? 0, o: ext ?? prevPc ?? 0, pc: prevPc };
-      } else {
-        if (ext !== null) result.c = ext;
-        if (prevPc !== null) result.pc = prevPc;
-      }
+  if (usRegularHours()) return result;
+  const [ext, prevPc, session] = await yfExtendedQuote(ticker);
+  // 列表两行显示:第一行常规收盘(Finnhub 的 c/pc 在非常规时段就是最近一个交易日的收盘/前收)
+  if (result) {
+    const reg = { c: result.c, pc: result.pc };
+    if (ext !== null && session) {
+      result.reg = reg;
+      result.ext = { p: ext, session };
+    }
+  }
+  // c/pc 的语义不变:只有 4:00–20:00 才用盘前盘后价覆盖(持仓盈亏等都按这个算)
+  if (usExtendedHours() && (ext !== null || prevPc !== null)) {
+    if (result === null) {
+      result = { c: ext ?? prevPc ?? 0, o: ext ?? prevPc ?? 0, pc: prevPc };
+    } else {
+      if (ext !== null) result.c = ext;
+      if (prevPc !== null) result.pc = prevPc;
     }
   }
   return result;

@@ -115,6 +115,8 @@ const PERIOD_KEY = "chart.period";
 
 const chgColor = (n: number | null) => (n === null || n === 0 ? FLAT : n > 0 ? UP : DOWN);
 const fmtPct = (n: number | null) => (n === null ? "--" : `${n > 0 ? "+" : ""}${n.toFixed(2)}%`);
+/** 最新成交价:非常规时段有盘前/盘后价就用它(持仓盈亏、离止损多远都按这个算) */
+const latestPrice = (q: { c: number; ext?: { p: number } } | null | undefined) => (q ? (q.ext?.p ?? q.c) : null);
 const fmtPrice = (n: number | null | undefined) => (n === null || n === undefined ? "--" : n.toFixed(2));
 
 function fmtVol(v: number): string {
@@ -601,6 +603,11 @@ type ListSort = { key: "name" | "chg"; dir: 1 | -1 } | null;
 const SORT_KEY = "chart.listSort";
 // 持仓没有对应的表,手动顺序只存在本机
 const HOLDINGS_ORDER_KEY = "chart.holdingsOrder";
+// 左侧列表宽度(桌面端可拖右边框调整),只存本机
+const LIST_WIDTH_KEY = "chart.listWidth";
+const LIST_WIDTH_MIN = 260;
+const LIST_WIDTH_MAX = 640;
+const clampListWidth = (w: number) => Math.round(Math.min(LIST_WIDTH_MAX, Math.max(LIST_WIDTH_MIN, w)));
 
 function readJson<T>(key: string, fallback: T): T {
   try {
@@ -701,6 +708,28 @@ function SidePanel({
   onBatchStops: (() => void) | null;
 }) {
   const [input, setInput] = useState("");
+  const [width, setWidth] = useState(() => clampListWidth(readJson(LIST_WIDTH_KEY, 340)));
+  const [resizing, setResizing] = useState(false);
+  // 拖右边框改宽度:按下时记起点,松手时存下来;双击恢复默认
+  const startResize = (e: ReactPointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const x0 = e.clientX;
+    const w0 = width;
+    let last = w0;
+    setResizing(true);
+    const move = (ev: PointerEvent) => {
+      last = clampListWidth(w0 + ev.clientX - x0);
+      setWidth(last);
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      setResizing(false);
+      writeJson(LIST_WIDTH_KEY, last);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
   // 拖拽:dragFrom = 拖起的行下标,dropAt = 插入位置(0..n)
   const [dragFrom, setDragFrom] = useState<number | null>(null);
   const [dropAt, setDropAt] = useState<number | null>(null);
@@ -712,7 +741,7 @@ function SidePanel({
     return c && pc ? ((c - pc) / pc) * 100 : null;
   };
   const extMode = rows.some((r) => quotes?.usd[r.ticker]?.ext);
-  const gridCols = extMode ? "grid-cols-[1fr_48px_120px] gap-x-2" : "grid-cols-[1fr_72px_auto] gap-x-3";
+  const gridCols = extMode ? "grid-cols-[1fr_48px_60px_72px] gap-x-2" : "grid-cols-[1fr_72px_auto] gap-x-3";
   const shown = useMemo(() => {
     if (!sort) return rows;
     return [...rows].sort((a, b) => {
@@ -756,7 +785,23 @@ function SidePanel({
   const list = lists.find((l) => l.id === tab) ?? null;
   const tabs = [{ id: HOLDINGS_TAB, name: "持仓" }, ...lists.map((l) => ({ id: l.id, name: l.name }))];
   return (
-    <aside className="flex flex-col min-h-0 lg:w-[340px] shrink-0" style={{ borderRight: `1px solid ${BORDER}` }}>
+    <aside
+      className="relative flex flex-col min-h-0 lg:w-[var(--list-w)] shrink-0"
+      style={{ borderRight: `1px solid ${BORDER}`, ["--list-w" as string]: `${width}px`, userSelect: resizing ? "none" : undefined }}
+    >
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="拖动调整列表宽度"
+        title="拖动调整宽度,双击恢复默认"
+        onPointerDown={startResize}
+        onDoubleClick={() => {
+          setWidth(340);
+          writeJson(LIST_WIDTH_KEY, 340);
+        }}
+        className="hidden lg:block absolute top-0 -right-1 h-full w-2 z-20 cursor-col-resize hover:bg-violet-500/30"
+        style={{ background: resizing ? "rgba(139,92,246,0.4)" : undefined }}
+      />
       <div className="px-4 pt-4 pb-2 flex items-center justify-between gap-2">
         <span className="flex items-center gap-1.5 min-w-0">
           <span className="text-sm font-bold text-white truncate">
@@ -848,10 +893,11 @@ function SidePanel({
           代码 {sortIcon("name")}
         </button>
         <span>今日</span>
+        {extMode && <span className="text-right whitespace-nowrap">最新价</span>}
         <button className={`relative text-right ${extMode ? "" : "w-20"} whitespace-nowrap text-[10px] tracking-widest hover:text-violet-300`} onClick={() => clickSort("chg")} title="按涨跌幅排序(再点反序,第三次回到手动顺序)">
           {/* 箭头挂在左边,不占列宽 */}
           <span className={`absolute top-1/2 -translate-y-1/2 ${extMode ? "right-full mr-0.5" : "-left-3.5"}`}>{sortIcon("chg")}</span>
-          {extMode ? "收盘 / 盘前盘后" : "现价 / 涨跌"}
+          {extMode ? "涨跌幅" : "现价 / 涨跌"}
         </button>
       </div>
       <div className="overflow-y-auto max-h-72 lg:max-h-none lg:flex-1">
@@ -930,31 +976,29 @@ function SidePanel({
   );
 }
 
-/** 非常规时段的报价格:第一行常规收盘 + 当日涨跌,第二行盘前/盘后价 + 相对收盘的涨跌 */
+/** 非常规时段的报价:价格、涨跌各占一栏;上面一行常规收盘 + 当日涨跌,下面一行盘前/盘后价 + 相对收盘的涨跌 */
 function ExtQuoteCell({ q, chg }: { q: Quote | null; chg: number | null }) {
   const close = q?.reg?.c ?? q?.c;
   const ext = q?.ext;
   const extChg = ext && close ? ((ext.p - close) / close) * 100 : null;
   return (
-    <span className="text-right">
-      <span className="flex items-baseline justify-end gap-2 whitespace-nowrap" style={mono}>
-        <span className="text-sm" style={{ color: chgColor(chg) }}>{fmtPrice(close)}</span>
-        <span className="text-xs" style={{ color: chgColor(chg) }}>{fmtPct(chg)}</span>
+    <>
+      <span className="text-right whitespace-nowrap" style={mono}>
+        <span className="block text-sm" style={{ color: chgColor(chg) }}>{fmtPrice(close)}</span>
+        <span className="block text-[11px]" style={{ color: ext ? SUB : MUTED }}>{ext ? fmtPrice(ext.p) : "--"}</span>
       </span>
-      <span className="flex items-baseline justify-end gap-2 whitespace-nowrap text-[11px]" style={mono}>
-        {ext ? (
-          <>
-            <span style={{ color: SUB }}>{fmtPrice(ext.p)}</span>
-            <span style={{ color: chgColor(extChg) }}>{fmtPct(extChg)}</span>
-            <span className="self-center text-[9px] leading-none px-0.5 py-px rounded -ml-1" style={{ color: TEXT, background: "rgba(255,255,255,0.12)" }}>
+      <span className="text-right whitespace-nowrap" style={mono}>
+        <span className="block text-sm" style={{ color: chgColor(chg) }}>{fmtPct(chg)}</span>
+        <span className="flex items-center justify-end gap-1 text-[11px]">
+          <span style={{ color: ext ? chgColor(extChg) : MUTED }}>{ext ? fmtPct(extChg) : "--"}</span>
+          {ext && (
+            <span className="text-[9px] leading-none px-0.5 py-px rounded" style={{ color: TEXT, background: "rgba(255,255,255,0.12)" }}>
               {ext.session === "pre" ? "前" : "后"}
             </span>
-          </>
-        ) : (
-          <span style={{ color: MUTED }}>--</span>
-        )}
+          )}
+        </span>
       </span>
-    </span>
+    </>
   );
 }
 
@@ -2486,7 +2530,8 @@ export default function ChartPage() {
     const ordered = holdings.map((h, i) => ({ h, k: key(h.ticker, i) })).sort((a, b) => a.k - b.k).map((x) => x.h);
     return ordered.map((h) => {
       const q = liveQuotes?.usd[h.ticker] ?? null;
-      const pnlPct = q && h.avgCost > 0 ? ((q.c - h.avgCost) / h.avgCost) * 100 : null;
+      const last = latestPrice(q);
+      const pnlPct = last !== null && h.avgCost > 0 ? ((last - h.avgCost) / h.avgCost) * 100 : null;
       return {
         ticker: h.ticker,
         sub: (
@@ -2498,7 +2543,7 @@ export default function ChartPage() {
           <StopLine
             stops={stops ? (stops[h.ticker] ?? []) : undefined}
             qty={h.qty}
-            price={q?.c ?? null}
+            price={last}
             error={stopsError}
             onEdit={() => setStopTicker(h.ticker)}
           />
@@ -2593,7 +2638,8 @@ export default function ChartPage() {
   const prevClose = quote?.pc ?? (data ? previousDayClose(data.candles, period) : null);
   const dayChg = price !== null && prevClose ? ((price - prevClose) / prevClose) * 100 : null;
 
-  const holdPct = holding && price !== null && holding.avgCost > 0 ? ((price - holding.avgCost) / holding.avgCost) * 100 : null;
+  const holdPrice = quote?.ext?.p ?? price;
+  const holdPct = holding && holdPrice !== null && holding.avgCost > 0 ? ((holdPrice - holding.avgCost) / holding.avgCost) * 100 : null;
 
   // 浏览器标签页标题:代码 现价 涨跌幅(持有的话再加 持仓盈亏%),离开页面时还原
   useEffect(() => {

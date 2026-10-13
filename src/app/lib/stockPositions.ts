@@ -255,4 +255,8 @@ export interface Quote {
   c: number;
   o: number;
   pc: number | null;
+  /** 非常规时段才有:最近一个常规交易日的收盘价和它的前收 */
+  reg?: { c: number; pc: number | null };
+  /** 非常规时段才有:盘前/盘后最新成交价(涨跌相对 reg.c) */
+  ext?: { p: number; session: "pre" | "post" };
 }
