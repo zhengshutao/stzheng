@@ -288,6 +288,13 @@ Deno.serve(async (req: Request) => {
       Deno.env.get("SUPABASE_ANON_KEY")!,
       { global: { headers: { Authorization: authHeader } } }
     );
+    // 只给本人用(和 snaptrade-* 一样);匿名 key 或别人注册的号都拒掉
+    const ownerId = Deno.env.get("PORTFOLIO_OWNER_USER_ID");
+    if (!ownerId) return new Response(JSON.stringify({ error: "server not configured" }), { status: 500, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } });
+    const { data: userData } = await supabase.auth.getUser();
+    if (userData.user?.id !== ownerId) {
+      return new Response(JSON.stringify({ error: "forbidden" }), { status: 403, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } });
+    }
 
     const { positions = [] } = await req.json() as {
       positions: { ticker: string; anchor: string | null; initial_floor: number | null }[];

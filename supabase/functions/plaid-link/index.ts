@@ -46,6 +46,10 @@ Deno.serve(async (req: Request) => {
       error: authErr,
     } = await supabaseUser.auth.getUser();
     if (authErr || !user) return jsonResponse({ error: "unauthorized" }, 401);
+    // 只给本人用:Supabase 开着注册时,别人注册个号也能连银行、花 Plaid 的额度
+    const ownerId = Deno.env.get("PORTFOLIO_OWNER_USER_ID");
+    if (!ownerId) return jsonResponse({ error: "server not configured" }, 500);
+    if (user.id !== ownerId) return jsonResponse({ error: "forbidden" }, 403);
 
     const supabaseAdmin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
     const base = PLAID_BASE[Deno.env.get("PLAID_ENV") ?? "production"];

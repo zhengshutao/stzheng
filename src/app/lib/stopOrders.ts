@@ -2,7 +2,7 @@
 
 import { FunctionsHttpError } from "@supabase/supabase-js";
 import { supabase } from "@/app/lib/supabase";
-import { ema, fetchCandles } from "@/app/lib/candles";
+import { ema, etFakeTime, fetchCandles } from "@/app/lib/candles";
 import type { SetStopResult, StopBasis, StopsByTicker } from "../../../supabase/functions/_shared/stopOrders.ts";
 
 export type { SetStopAccountResult, SetStopResult, StopBasis, StopView, StopsByTicker } from "../../../supabase/functions/_shared/stopOrders.ts";
@@ -21,6 +21,86 @@ async function invoke<T>(body: unknown): Promise<T> {
 
 export async function fetchStopOrders(): Promise<StopsByTicker> {
   return (await invoke<{ stops: StopsByTicker }>({ action: "list" })).stops;
+}
+
+// ---- 收盘后少查:止损单只在常规交易时段触发,收盘后查过一次就一直有效到下次开盘 ----
+
+const STOPS_CACHE_KEY = "chart.stops.live";
+
+/** 美东墙上时间(当 UTC 的秒数)落在常规交易时段里吗:周一到周五 9:30–16:00,不管节假日 */
+function inSession(fake: number): boolean {
+  const d = new Date(fake * 1000);
+  const dow = d.getUTCDay();
+  const hm = d.getUTCHours() * 60 + d.getUTCMinutes();
+  return dow >= 1 && dow <= 5 && hm >= 9 * 60 + 30 && hm < 16 * 60;
+}
+
+/** 最近一次收盘(工作日 16:00 美东),同样是"墙上时间当 UTC"的秒数 */
+function lastClose(fake: number): number {
+  const day = Math.floor(fake / 86400) * 86400;
+  for (let i = 0; i < 7; i++) {
+    const close = day - i * 86400 + 16 * 3600;
+    const dow = new Date(close * 1000).getUTCDay();
+    if (dow >= 1 && dow <= 5 && close <= fake) return close;
+  }
+  return 0;
+}
+
+/** 收盘后、而且上次实时查询是在这次收盘之后做的,就直接用那次的结果 */
+function readStopsCache(): StopsByTicker | null {
+  try {
+    const raw = localStorage.getItem(STOPS_CACHE_KEY);
+    if (!raw) return null;
+    const { at, stops } = JSON.parse(raw) as { at: number; stops: StopsByTicker };
+    const now = etFakeTime(new Date(), false);
+    return !inSession(now) && at >= lastClose(now) ? stops : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 记下实时查到(或刚改完)的止损 */
+export function saveStopsCache(stops: StopsByTicker): void {
+  try {
+    localStorage.setItem(STOPS_CACHE_KEY, JSON.stringify({ at: etFakeTime(new Date(), false), stops }));
+  } catch {
+    /* 存不了就每次都实时查 */
+  }
+}
+
+/** 进页面用:收盘后有可用的结果就不打 SnapTrade;force(刷新持仓)总是实时查 */
+export async function loadStopOrders(force = false): Promise<StopsByTicker> {
+  const cached = force ? null : readStopsCache();
+  if (cached) return cached;
+  const stops = await fetchStopOrders();
+  saveStopsCache(stops);
+  return stops;
+}
+
+/**
+ * 实时查不到时(Wealthsimple 限流等)的兜底:读自己库里记的、还没标撤单的止损。
+ * 只有从页面 / 脚本下的单才有记录;已经触发成交、或在 App 里撤掉的单这里还在,所以只能当参考。
+ */
+export async function fetchCachedStopOrders(): Promise<StopsByTicker> {
+  const { data, error } = await supabase
+    .from("stock_stop_orders")
+    .select("ticker, account_id, brokerage_order_id, stop_price, units, basis, created_at")
+    .is("canceled_at", null);
+  if (error) throw new Error(`stock_stop_orders: ${error.message}`);
+  const out: StopsByTicker = {};
+  for (const r of data ?? []) {
+    (out[r.ticker] ??= []).push({
+      orderId: r.brokerage_order_id,
+      accountId: r.account_id,
+      accountName: r.account_id.slice(0, 8),
+      units: Number(r.units),
+      stop: Number(r.stop_price),
+      basis: r.basis as StopBasis,
+      status: "CACHED",
+      placedAt: r.created_at,
+    });
+  }
+  return out;
 }
 
 /** 撤掉该股票所有账户的旧止损,按全部持仓重新挂 Stop GTC @ stop */

@@ -4,7 +4,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router";
-import { ArrowDown, ArrowLeft, ArrowUp, Eraser, GripVertical, Pencil, X, Heart, Plus, Settings, Minus, MousePointer2, MoveUpRight, RectangleHorizontal, RefreshCw, Trash2 } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowUp, Eraser, GripVertical, Pencil, X, Heart, Plus, Settings, Minus, MousePointer2, MoveUpRight, RectangleHorizontal, RefreshCw, Ruler, Trash2 } from "lucide-react";
 import {
   CandlestickSeries,
   ColorType,
@@ -24,13 +24,15 @@ import {
 import DashboardNavbar from "./DashboardNavbar";
 import { TradeMarksPrimitive } from "@/app/lib/chartMarks";
 import { fetchAll, type StockSplit, type StockTrade } from "@/app/lib/dashboardData";
-import { computePositions } from "@/app/lib/stockPositions";
+import { computePositions, type Quote } from "@/app/lib/stockPositions";
 import { fetchQuotes, type QuotesResponse } from "@/app/lib/stockApi";
 import { runSnaptradeSync } from "@/app/lib/portfolioApi";
 import {
   BASIS_LABEL,
   emaStops,
-  fetchStopOrders,
+  fetchCachedStopOrders,
+  loadStopOrders,
+  saveStopsCache,
   planBatch,
   setStopLoss,
   type BatchPlanRow,
@@ -49,6 +51,7 @@ import {
   saveDrawings,
   type DrawTool,
   type Drawing,
+  type Grip,
   type Pt,
 } from "@/app/lib/chartDrawings";
 import {
@@ -617,8 +620,8 @@ function writeJson(key: string, value: unknown) {
 }
 
 /** 当天走势迷你图:前收盘为虚线基准,收在前收盘之上红、之下绿 */
-function Sparkline({ spark }: { spark: Spark | null | undefined }) {
-  const W = 72;
+function Sparkline({ spark, width = 72 }: { spark: Spark | null | undefined; width?: number }) {
+  const W = width;
   const H = 30;
   const closes = spark?.closes ?? [];
   if (closes.length < 2) return <span style={{ width: W, height: H }} className="block" />;
@@ -701,10 +704,15 @@ function SidePanel({
   // 拖拽:dragFrom = 拖起的行下标,dropAt = 插入位置(0..n)
   const [dragFrom, setDragFrom] = useState<number | null>(null);
   const [dropAt, setDropAt] = useState<number | null>(null);
+  // 非常规时段(有 reg/ext)按常规收盘的涨跌排、着色;盘前盘后的涨跌另起一行
   const chgOf = (t: string) => {
     const q = quotes?.usd[t];
-    return q && q.pc ? ((q.c - q.pc) / q.pc) * 100 : null;
+    const c = q?.reg?.c ?? q?.c;
+    const pc = q?.reg ? q.reg.pc : q?.pc;
+    return c && pc ? ((c - pc) / pc) * 100 : null;
   };
+  const extMode = rows.some((r) => quotes?.usd[r.ticker]?.ext);
+  const gridCols = extMode ? "grid-cols-[1fr_48px_120px] gap-x-2" : "grid-cols-[1fr_72px_auto] gap-x-3";
   const shown = useMemo(() => {
     if (!sort) return rows;
     return [...rows].sort((a, b) => {
@@ -833,17 +841,17 @@ function SidePanel({
       )}
 
       <div
-        className="grid grid-cols-[1fr_72px_auto] gap-x-3 px-4 pb-2 text-[10px] tracking-widest"
+        className={`grid ${gridCols} px-4 pb-2 text-[10px] tracking-widest`}
         style={{ ...mono, color: MUTED, borderBottom: `1px solid ${BORDER}` }}
       >
         <button className="flex items-center gap-1 text-left whitespace-nowrap text-[10px] tracking-widest hover:text-violet-300" onClick={() => clickSort("name")} title="按代码排序(再点反序,第三次回到手动顺序)">
           代码 {sortIcon("name")}
         </button>
         <span>今日</span>
-        <button className="relative text-right w-20 whitespace-nowrap text-[10px] tracking-widest hover:text-violet-300" onClick={() => clickSort("chg")} title="按涨跌幅排序(再点反序,第三次回到手动顺序)">
+        <button className={`relative text-right ${extMode ? "" : "w-20"} whitespace-nowrap text-[10px] tracking-widest hover:text-violet-300`} onClick={() => clickSort("chg")} title="按涨跌幅排序(再点反序,第三次回到手动顺序)">
           {/* 箭头挂在左边,不占列宽 */}
-          <span className="absolute -left-3.5 top-1/2 -translate-y-1/2">{sortIcon("chg")}</span>
-          现价 / 涨跌
+          <span className={`absolute top-1/2 -translate-y-1/2 ${extMode ? "right-full mr-0.5" : "-left-3.5"}`}>{sortIcon("chg")}</span>
+          {extMode ? "收盘 / 盘前盘后" : "现价 / 涨跌"}
         </button>
       </div>
       <div className="overflow-y-auto max-h-72 lg:max-h-none lg:flex-1">
@@ -884,7 +892,7 @@ function SidePanel({
             >
               <button
                 onClick={() => onPick(r.ticker)}
-                className="w-full grid grid-cols-[1fr_72px_auto] gap-x-3 items-center px-4 py-2 text-left cursor-[inherit]"
+                className={`w-full grid ${gridCols} items-center px-4 py-2 text-left cursor-[inherit]`}
               >
                 <span className="min-w-0">
                   <span className="block text-sm font-semibold" style={{ ...mono, color: TEXT }}>
@@ -894,15 +902,19 @@ function SidePanel({
                     {r.sub ?? sparks[r.ticker]?.name ?? ""}
                   </span>
                 </span>
-                <Sparkline spark={sparks[r.ticker]} />
-                <span className="text-right w-20">
-                  <span className="block text-sm" style={{ ...mono, color: chgColor(chg) }}>
-                    {fmtPrice(q?.c)}
+                <Sparkline spark={sparks[r.ticker]} width={extMode ? 48 : 72} />
+                {extMode ? (
+                  <ExtQuoteCell q={q} chg={chg} />
+                ) : (
+                  <span className="text-right w-20">
+                    <span className="block text-sm" style={{ ...mono, color: chgColor(chg) }}>
+                      {fmtPrice(q?.c)}
+                    </span>
+                    <span className="block text-xs" style={{ ...mono, color: chgColor(chg) }}>
+                      {fmtPct(chg)}
+                    </span>
                   </span>
-                  <span className="block text-xs" style={{ ...mono, color: chgColor(chg) }}>
-                    {fmtPct(chg)}
-                  </span>
-                </span>
+                )}
               </button>
               {r.footer}
             </div>
@@ -915,6 +927,34 @@ function SidePanel({
         )}
       </div>
     </aside>
+  );
+}
+
+/** 非常规时段的报价格:第一行常规收盘 + 当日涨跌,第二行盘前/盘后价 + 相对收盘的涨跌 */
+function ExtQuoteCell({ q, chg }: { q: Quote | null; chg: number | null }) {
+  const close = q?.reg?.c ?? q?.c;
+  const ext = q?.ext;
+  const extChg = ext && close ? ((ext.p - close) / close) * 100 : null;
+  return (
+    <span className="text-right">
+      <span className="flex items-baseline justify-end gap-2 whitespace-nowrap" style={mono}>
+        <span className="text-sm" style={{ color: chgColor(chg) }}>{fmtPrice(close)}</span>
+        <span className="text-xs" style={{ color: chgColor(chg) }}>{fmtPct(chg)}</span>
+      </span>
+      <span className="flex items-baseline justify-end gap-2 whitespace-nowrap text-[11px]" style={mono}>
+        {ext ? (
+          <>
+            <span style={{ color: SUB }}>{fmtPrice(ext.p)}</span>
+            <span style={{ color: chgColor(extChg) }}>{fmtPct(extChg)}</span>
+            <span className="self-center text-[9px] leading-none px-0.5 py-px rounded -ml-1" style={{ color: TEXT, background: "rgba(255,255,255,0.12)" }}>
+              {ext.session === "pre" ? "前" : "后"}
+            </span>
+          </>
+        ) : (
+          <span style={{ color: MUTED }}>--</span>
+        )}
+      </span>
+    </span>
   );
 }
 
@@ -937,7 +977,8 @@ function StopLine({
   onEdit: () => void;
 }) {
   let label: ReactNode;
-  if (error) label = <span style={{ color: AMBER }} title={error}>止损 读取失败</span>;
+  // 有 error 但 stops 有值 = 实时查失败,显示的是库里记的(缓存)
+  if (error && !stops?.length) label = <span style={{ color: AMBER }} title={error}>止损 读取失败</span>;
   else if (!stops) label = <span style={{ color: MUTED }}>止损 …</span>;
   else if (!stops.length) label = <span style={{ color: AMBER }}>止损 未设</span>;
   else {
@@ -957,6 +998,11 @@ function StopLine({
           <span style={{ color: bases[0] === "custom" ? SUB : EMA_COLORS[bases[0] === "ema10" ? 10 : 20] }}> · {BASIS_LABEL[bases[0]]}</span>
         )}
         {covered < qty - 1e-6 && <span style={{ color: AMBER }}> · 只覆盖 {covered}/{qty} 股</span>}
+        {error && (
+          <span style={{ color: AMBER }} title={`实时查询失败,显示的是上次从页面下单时记下的价格,可能已触发或已撤:${error}`}>
+            {" "}· 缓存
+          </span>
+        )}
       </span>
     );
   }
@@ -1645,10 +1691,11 @@ function placeLastBar(chart: IChartApi, barSpacing: number, lastBarAt: number, t
 }
 
 const DRAW_TOOLS: { key: DrawTool; label: string; Icon: typeof Minus }[] = [
-  { key: "cursor", label: "选择(点线条选中,Delete 删除)", Icon: MousePointer2 },
+  { key: "cursor", label: "选择(点线条选中,拖端点改位置,Delete 删除)", Icon: MousePointer2 },
   { key: "ray", label: "射线:点起点,再点方向", Icon: MoveUpRight },
   { key: "hline", label: "水平线:点一下", Icon: Minus },
   { key: "rect", label: "矩形:点一个角,再点对角", Icon: RectangleHorizontal },
+  { key: "measure", label: "测量区间:点起点,再点终点,显示涨跌幅", Icon: Ruler },
 ];
 
 function ToolButton({
@@ -1985,21 +2032,55 @@ function CandleChart({
     const chart = chartRef.current;
     const prim = primRef.current;
     if (!chart || !prim) return;
-    const twoPoint = (type: "ray" | "rect", a: Pt, b: Pt, id: string): Drawing =>
-      type === "ray" ? { id, type: "ray", a, b } : { id, type: "rect", a, b };
+    const twoPoint = (type: "ray" | "rect" | "measure", a: Pt, b: Pt, id: string): Drawing => ({ id, type, a, b });
 
     // 不用 chart.subscribeClick:它会把两下快速点击当双击吞掉,画射线/矩形时第二下就丢了。
     // 自己在容器上认"按下又松开、没怎么移动"为一次点击。
     const el = containerRef.current!;
     let down: { x: number; y: number } | null = null;
+    // 选择模式下按住端点拖动:拖的过程只更新 primitive,松手才存
+    let drag: (Grip & { next: Drawing[] }) | null = null;
     const local = (e: PointerEvent) => {
       const r = el.getBoundingClientRect();
       return { x: e.clientX - r.left, y: e.clientY - r.top };
     };
     const onDown = (e: PointerEvent) => {
       down = e.button === 0 ? local(e) : null;
+      if (!down || tool !== "cursor") return;
+      const grip = prim.gripAt(down.x, down.y);
+      if (!grip) return;
+      // 抢在图表自己的 mousedown 之前关掉平移,不然拖端点时整张图也跟着动
+      chart.applyOptions({ handleScroll: false, handleScale: false });
+      drag = { ...grip, next: drawings };
+      setSelectedId(grip.id);
+      window.addEventListener("pointermove", onDragMove);
+    };
+    const onDragMove = (e: PointerEvent) => {
+      if (!drag) return;
+      const { x, y } = local(e);
+      const pt = prim.pointToPt(x, y);
+      if (!pt) return;
+      const { id, part } = drag;
+      drag.next = drawings.map((d) => {
+        if (d.id !== id) return d;
+        if (d.type === "hline") return { ...d, price: pt.price };
+        return part === "a" ? { ...d, a: pt } : { ...d, b: pt };
+      });
+      prim.setDrawings(drag.next, id);
+    };
+    const endDrag = () => {
+      window.removeEventListener("pointermove", onDragMove);
+      chart.applyOptions({ handleScroll: true, handleScale: true });
+      const { next } = drag!;
+      drag = null;
+      if (next !== drawings) commit(next);
     };
     const onUp = (e: PointerEvent) => {
+      if (drag) {
+        down = null;
+        endDrag();
+        return;
+      }
       if (!down) return;
       const { x, y } = local(e);
       const moved = Math.hypot(x - down.x, y - down.y);
@@ -2046,12 +2127,20 @@ function CandleChart({
       else if (pendingRef.current) prim.setDraft(twoPoint(tool, pendingRef.current, pt, "draft"));
     };
 
+    // 拖到图外松手也要收尾
+    const onWindowUp = () => {
+      if (drag) endDrag();
+    };
+
     el.addEventListener("pointerdown", onDown, true);
     el.addEventListener("pointerup", onUp, true);
+    window.addEventListener("pointerup", onWindowUp);
     chart.subscribeCrosshairMove(onMove);
     return () => {
       el.removeEventListener("pointerdown", onDown, true);
       el.removeEventListener("pointerup", onUp, true);
+      window.removeEventListener("pointerup", onWindowUp);
+      window.removeEventListener("pointermove", onDragMove);
       chart.unsubscribeCrosshairMove(onMove);
     };
   }, [tool, drawings, commit]);
@@ -2229,7 +2318,7 @@ export default function ChartPage() {
     try {
       const r = await runSnaptradeSync();
       await loadTrades();
-      loadStops();
+      loadStops(true);
       const n = r.newTrades + r.newCash;
       setRefreshNote(`${new Date().toLocaleTimeString()} 已刷新:${n ? `新增交易 ${r.newTrades} / 现金 ${r.newCash}` : "没有新成交"}`);
     } catch (e) {
@@ -2240,17 +2329,32 @@ export default function ChartPage() {
   };
 
   // ---- 止损:持仓行下面显示,订单不常变,进页面、刷新持仓、改完止损时各拉一次 ----
-  const loadStops = useCallback(() => {
-    fetchStopOrders()
+  // 实时查失败(多半是 Wealthsimple 限流 429)就先显示库里记的止损,stopsError 留着让行上标"缓存"
+  const loadStops = useCallback((force = false) => {
+    loadStopOrders(force)
       .then((s) => {
         setStops(s);
         setStopsError(null);
       })
-      .catch((e) => setStopsError(String((e as Error).message ?? e)));
+      .catch(async (e) => {
+        setStopsError(String((e as Error).message ?? e));
+        try {
+          const cached = await fetchCachedStopOrders();
+          setStops((prev) => prev ?? cached);
+        } catch {
+          /* 库也读不到就只显示读取失败 */
+        }
+      });
   }, []);
-  useEffect(loadStops, [loadStops]);
+  useEffect(() => loadStops(), [loadStops]);
   /** 改完一只:用返回里这只股票的最新止损替换 */
-  const applyStopResult = (r: SetStopResult) => setStops((prev) => ({ ...(prev ?? {}), [r.ticker]: r.stops[r.ticker] ?? [] }));
+  const applyStopResult = (r: SetStopResult) =>
+    setStops((prev) => {
+      const next = { ...(prev ?? {}), [r.ticker]: r.stops[r.ticker] ?? [] };
+      // 兜底的库缓存不往里存,免得收盘后一直用它
+      if (!stopsError) saveStopsCache(next);
+      return next;
+    });
 
   // ---- 自选列表 ----
   useEffect(() => {

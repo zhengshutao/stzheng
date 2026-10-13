@@ -1,4 +1,4 @@
-// K 线页的画线工具 —— 射线、水平线、矩形。
+// K 线页的画线工具 —— 射线、水平线、矩形、测量区间。
 //
 // 画在 K 线 series 上的一个 primitive(lightweight-charts 的自定义绘制插件)。
 // 锚点存的是 {time, price}:time 用和 K 线同一套"美东墙上时间当 UTC"的秒数(见 candles.ts),
@@ -18,7 +18,7 @@ import type {
   Time,
 } from "lightweight-charts";
 
-export type DrawTool = "cursor" | "ray" | "hline" | "rect";
+export type DrawTool = "cursor" | "ray" | "hline" | "rect" | "measure";
 
 export interface Pt {
   time: number;
@@ -28,16 +28,25 @@ export interface Pt {
 export type Drawing =
   | { id: string; type: "ray"; a: Pt; b: Pt }
   | { id: string; type: "hline"; price: number }
-  | { id: string; type: "rect"; a: Pt; b: Pt };
+  | { id: string; type: "rect"; a: Pt; b: Pt }
+  | { id: string; type: "measure"; a: Pt; b: Pt };
+
+/** 可拖动的部位:两点线的 a / b 端点,或整条水平线 */
+export type Grip = { id: string; part: "a" | "b" | "line" };
 
 const COLORS = {
   ray: "#38bdf8",
   hline: "#f5c542",
   rect: "#8b5cf6",
   rectFill: "rgba(139,92,246,0.12)",
+  measureUp: "#3b82f6",
+  measureUpFill: "rgba(59,130,246,0.14)",
+  measureDown: "#f23645",
+  measureDownFill: "rgba(242,54,69,0.12)",
 };
 
 const HIT_PX = 6;
+const GRIP_PX = 8;
 
 type DrawTarget = Parameters<IPrimitivePaneRenderer["draw"]>[0];
 
@@ -179,6 +188,24 @@ export class DrawingsPrimitive implements ISeriesPrimitive<Time> {
     return x === null || y === null ? null : [x, y];
   }
 
+  /** 按下的位置是不是某条线的端点(选中的那条优先);水平线整条都能拖 */
+  gripAt(x: number, y: number): Grip | null {
+    const order = [...this.drawings].reverse();
+    order.sort((p, q) => Number(q.id === this.selectedId) - Number(p.id === this.selectedId));
+    for (const d of order) {
+      if (d.type === "hline") {
+        const yy = this.toY(d.price);
+        if (yy !== null && Math.abs(y - yy) <= HIT_PX) return { id: d.id, part: "line" };
+        continue;
+      }
+      for (const part of ["b", "a"] as const) {
+        const p = this.toXY(d[part]);
+        if (p && Math.hypot(x - p[0], y - p[1]) <= GRIP_PX) return { id: d.id, part };
+      }
+    }
+    return null;
+  }
+
   /** 点击位置命中哪条线(取最后画的那条);没命中返回 null */
   findAt(x: number, y: number): string | null {
     for (let i = this.drawings.length - 1; i >= 0; i--) {
@@ -259,6 +286,8 @@ export class DrawingsPrimitive implements ISeriesPrimitive<Time> {
             this.handle(ctx, a[0], a[1], COLORS.ray);
             this.handle(ctx, b[0], b[1], COLORS.ray);
           }
+        } else if (d.type === "measure") {
+          this.drawMeasure(ctx, d.a, d.b, a, b, selected);
         } else {
           const x = Math.min(a[0], b[0]);
           const y = Math.min(a[1], b[1]);
@@ -276,6 +305,82 @@ export class DrawingsPrimitive implements ISeriesPrimitive<Time> {
         ctx.restore();
       }
     });
+  }
+
+  /** 工字形测量:上下两条横线 + 中间带箭头的竖虚线,标出价差、涨跌幅和跨了几根 K 线 */
+  private drawMeasure(
+    ctx: CanvasRenderingContext2D,
+    pa: Pt,
+    pb: Pt,
+    [ax, ay]: [number, number],
+    [bx, by]: [number, number],
+    selected: boolean
+  ): void {
+    const up = pb.price >= pa.price;
+    const color = up ? COLORS.measureUp : COLORS.measureDown;
+    const left = Math.min(ax, bx);
+    const right = Math.max(ax, bx);
+    const mid = (left + right) / 2;
+
+    ctx.fillStyle = up ? COLORS.measureUpFill : COLORS.measureDownFill;
+    ctx.fillRect(left, Math.min(ay, by), right - left, Math.abs(ay - by));
+
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(left, ay);
+    ctx.lineTo(right, ay);
+    ctx.moveTo(left, by);
+    ctx.lineTo(right, by);
+    ctx.stroke();
+
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.moveTo(mid, ay);
+    ctx.lineTo(mid, by);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    if (Math.abs(by - ay) > 8) {
+      const dir = by < ay ? 1 : -1;
+      ctx.beginPath();
+      ctx.moveTo(mid - 5, by + dir * 6);
+      ctx.lineTo(mid, by);
+      ctx.lineTo(mid + 5, by + dir * 6);
+      ctx.stroke();
+    }
+
+    // 标签
+    const diff = pb.price - pa.price;
+    const pct = pa.price ? (diff / pa.price) * 100 : 0;
+    const la = this.timeToLogical(pa.time);
+    const lb = this.timeToLogical(pb.time);
+    const bars = la !== null && lb !== null ? Math.round(Math.abs(lb - la)) : null;
+    const sign = diff >= 0 ? "+" : "";
+    const lines = [`${sign}${diff.toFixed(2)} (${sign}${pct.toFixed(2)}%)`];
+    if (bars !== null) lines.push(`${bars} 根K线`);
+    ctx.font = "600 12px 'JetBrains Mono', monospace";
+    const padX = 8;
+    const lineH = 16;
+    const w = Math.max(...lines.map((t) => ctx.measureText(t).width)) + padX * 2;
+    const h = lines.length * lineH + 6;
+    const bx0 = mid - w / 2;
+    const by0 = by < ay ? by - h - 6 : by + 6;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.roundRect(bx0, by0, w, h, 4);
+    ctx.fill();
+    ctx.fillStyle = "#fff";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    lines.forEach((t, i) => {
+      if (i === 1) ctx.font = "11px 'JetBrains Mono', monospace";
+      ctx.fillText(t, mid, by0 + 4 + i * lineH);
+    });
+
+    if (selected) {
+      this.handle(ctx, ax, ay, color);
+      this.handle(ctx, bx, by, color);
+    }
   }
 
   private handle(ctx: CanvasRenderingContext2D, x: number, y: number, color: string): void {
