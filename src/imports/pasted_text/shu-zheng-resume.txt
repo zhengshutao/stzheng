@@ -1,0 +1,50 @@
+\documentclass{resume}
+\usepackage{CJKutf8}
+\name{ShuTao Zheng}
+\address{+1 (416)801-5771     \\ https://zhengshutao.github.io   \\ stzheng@uwaterloo.ca}
+\begin{document}
+\begin{rSection}{Education}
+{\bf University of Waterloo \hfill Waterloo, Ontario}\\
+Bachelor of Mathematics \hfill September 2018 - August 2023\\
+Computational Mathematics Major $\&$ Combinatorics and Optimization Minor $\&$ Computing Minor\\
+{\bf Relevant Courses:} 
+Algorithm Problem Solving and Data Abstraction,
+Data Types and Structures,
+Object-Oriented Software Development,
+Data-Intensive Distributed Computing,
+Applied Cryptography
+Game Theory
+\end{rSection}
+\begin{rSection}{Work Experience}
+{\bf Web Developer $|$ AEC Daily Inc $|$ Newmarket, ON $|$ Co-op Jan. - Apr. 2023 Fulltime May 2024 - Now}\\
+$\cdot$ Designed and implemented an object-oriented reporting framework  with extensible API design and multi-format output (Excel/HTML), significantly improving system maintainability, reducing code duplication, and enhancing enterprise reporting efficiency.\\
+$\cdot$ Discovered, reported, and resolved a critical security vulnerability in the admin authentication system, where access was granted solely based on email domain without verifying ownership. Led risk analysis and implemented stricter validation protocols, significantly improving system security.\\
+$\cdot$ Developed a Recommended Courses feature that dynamically suggested relevant content by querying the course database using PostgreSQL and integrating with front-end templates via Smarty and PHP, enhancing user engagement and personalized learning paths.\\
+{\bf Software Engineer $|$ Lifion by ADP $|$ New York, NY $|$ May - Aug. 2022 }\\
+$\cdot$ Redesigned and incorporated new features into an internal flowchart application with Node.js, resulting in improved output information and a better user experience.\\
+$\cdot$ Developed new logic operators for the internal flowchart application, increasing its functionality for users.\\
+$\cdot$ Implemented integration testing via Jenkins, ensuring coverage of over 90\% of newly introduced features and guaranteeing the robustness of the application.\\
+{\bf Quality Assurance Engineer $|$ NetDragon Websoft Holdings $|$ Fuzhou, China $|$ Sept. 2020 - Aug. 2021}\\
+$\cdot$ Developed an automated testing system for ActivPanel by Promethean, an educational interactive display deployed in over 1 million classrooms worldwide.\\
+$\cdot$ Played a key role in three product launches by creating an optimized test workflow in JIRA, facilitating efficient test case management, risk assessment automation, and generation of insightful test reports.
+\end{rSection}
+\begin{rSection}{Projects}
+{\bf CELPIP Exam Practice Platform www.deercelpip.com\hfill JavaScript • Python • PostgreSQL • Git}\\
+$\cdot$ Developed a production-ready English exam practice platform with interactive Listening, Reading, Writing, and Speaking modules aligned with CELPIP test formats.\\
+$\cdot$ Built 30+ RESTful APIs using Flask to deliver test content, handle user submissions, and integrate AI models for automated scoring, personalized feedback, and speech-to-text transcription.\\
+$\cdot$ Designed optimized PostgreSQL schemas with indexing, transaction management, and backup strategies, supporting thousands of students with sub-second query response times.\\
+$\cdot$ Implemented rich multimedia features including WebRTC-based speaking assessments, HTML5 audio/video playback with custom controls, and real-time progress tracking via WebSockets.\\
+$\cdot$ Enhanced security with JWT authentication, PBKDF2 password hashing, Fernet encryption, SQL injection/XSS prevention, and GDPR-compliant data handling.\\
+$\cdot$ Optimized performance through CDN integration, lazy loading, caching, and compression, reducing load time by 60\% and scaling reliably to 500+ concurrent users.\\
+$\cdot$ Containerized and deployed platform using Docker with CI/CD pipelines, automated testing, and monitoring, ensuring less than 2sec global load times and 95\% code coverage.\\
+{\bf Aya Calendar (Couples Calendar App) \hfill Flutter • Dart • Swift/WidgetKit • CloudBase Serverless}\\
+$\cdot$ Designed and implemented a local-first offline architecture using Drift (SQLite) with incremental sync to Tencent CloudBase, reducing cloud read requests while maintaining full offline availability and conflict resolution.\\
+$\cdot$ Built and maintained mutiple independent serverless functions on Tencent CloudBase, handling authentication, data sync, and business logic for a multi-module couples productivity app.\\
+$\cdot$ Developed native iOS Home Screen Widgets in Swift/WidgetKit supporting different sizes with distinct layouts for paired/unpaired states, extending app engagement beyond the main UI.\\
+$\cdot$ Automated build and release pipeline using Xcode Cloud CI scripts, streamlining deployment across development and production environments.
+\end{rSection}
+\begin{rSection}{SKILLS} 
+{\bf Programming Language:} Python, C, C++, PHP, JavaScript/Node.js, HTML/CSS, Spark, R\\
+{\bf Development Tools:} Linux, VS Code, Docker, PostgreSQL, Jira, Jenkins, Bugzilla\\
+\end{rSection}
+\end{document}
