@@ -181,9 +181,8 @@ function Navbar({
     if (avatarClickTimerRef.current) clearTimeout(avatarClickTimerRef.current);
     if (avatarClicksRef.current >= 3) {
       avatarClicksRef.current = 0;
-      // 交易系统在私有仓库、部署在自己的服务器上;登录态由那边处理
-      const tradingUrl = import.meta.env.VITE_TRADING_URL;
-      if (tradingUrl) window.location.href = `${tradingUrl.replace(/\/$/, "")}/login`;
+      // /login 由另一个 Worker(私有交易系统)接管,所以整页跳转而不是路由内导航
+      window.location.href = "/login";
       return;
     }
     avatarClickTimerRef.current = setTimeout(() => {
